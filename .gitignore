@@ -1,0 +1,13 @@
+/build/
+/.vscode/
+/.idea/
+
+*.exe
+*.o
+*.obj
+*.dll
+*.a
+*.so
+*.dylib
+
+compile_commands.json
