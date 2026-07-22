@@ -10,6 +10,7 @@ include_directories(include)
 add_executable(database
     src/main.cpp
     src/page.cpp
+    src/disk_manager.cpp
 )
 
 enable_testing()
@@ -21,9 +22,18 @@ add_executable(page_test
     src/page.cpp
 )
 
+add_executable(disk_manager_test
+    tests/disk_manager_test.cpp
+    src/disk_manager.cpp
+)
+
 target_include_directories(page_test PRIVATE include)
 
 target_link_libraries(page_test PRIVATE
+    GTest::gtest_main
+)
+
+target_link_libraries(disk_manager_test PRIVATE
     GTest::gtest_main
 )
 
