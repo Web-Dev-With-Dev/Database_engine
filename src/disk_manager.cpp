@@ -2,6 +2,9 @@
 
 #include <cstring>
 #include <stdexcept>
+#include <mutex>
+
+std::mutex DiskManager::file_mutex_;
 
 DiskManager::DiskManager(const std::string &file_name)
     : file_name_(file_name), next_page_id_(0)
@@ -57,6 +60,9 @@ page_id_t DiskManager::AllocatePage()
 
 void DiskManager::WritePage(page_id_t page_id, const char *data)
 {
+
+     std::lock_guard<std::mutex> lock(file_mutex_);
+
     const size_t offset = static_cast<size_t>(page_id) * PAGE_SIZE;
 
     db_file_.seekg(0, std::ios::end);
@@ -123,6 +129,9 @@ void DiskManager::WritePage(page_id_t page_id, const char *data)
 
 void DiskManager::ReadPage(page_id_t page_id, char *buffer)
 {
+
+    std::lock_guard<std::mutex> guard(file_mutex_);
+
     std::memset(buffer, 0, PAGE_SIZE);
 
     size_t offset = static_cast<size_t>(page_id) * PAGE_SIZE;

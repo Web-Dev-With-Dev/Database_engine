@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <string>
+#include <mutex>
 #include <cstddef>
 
 #include "config.h"
@@ -20,6 +21,8 @@ public:
     void WritePage(page_id_t page_id, const char *data);
 
     void ReadPage(page_id_t page_id, char *buffer);
+
+    static std::mutex file_mutex_;
 
     ~DiskManager();
 };
