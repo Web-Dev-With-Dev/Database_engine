@@ -2,11 +2,8 @@
 
 #include <array>
 #include <shared_mutex>
-#include <cstdint>
-#include <cstddef>
 
-constexpr size_t PAGE_SIZE = 4096;
-using page_id_t = int32_t;
+#include "config.h"  // PAGE_SIZE, page_id_t, INVALID_PAGE_ID
 
 class Page {
 private:

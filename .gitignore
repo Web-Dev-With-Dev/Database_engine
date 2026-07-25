@@ -2,6 +2,9 @@
 /.vscode/
 /.idea/
 
+# Test-generated database files
+Data/*.db
+
 *.exe
 *.o
 *.obj
@@ -11,3 +14,4 @@
 *.dylib
 
 compile_commands.json
+*.log

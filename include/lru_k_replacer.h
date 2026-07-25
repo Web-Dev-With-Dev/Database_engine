@@ -36,6 +36,7 @@ public:
     void SetEvictable(size_t frame_id, bool evictable);
 
     size_t GetEvictableCount() const;
+    size_t GetEvictionCount() const;   // Total frames evicted since construction/Reset
     size_t GetTotalFrames() const;
 
     bool IsEvictable(size_t frame_id) const;
@@ -48,14 +49,13 @@ public:
 private:
     struct FrameInfo {
         size_t frame_id;
-        std::deque<size_t> access_history;  
-        size_t access_count;
+        std::deque<size_t> access_history;  // Sliding window of last k timestamps
+        size_t access_count;                // Total accesses recorded
         bool is_pinned;
         bool is_evictable;
-        void* data;  
         
         FrameInfo() : frame_id(0), access_count(0), is_pinned(false), 
-                      is_evictable(false), data(nullptr) {}
+                      is_evictable(false) {}
     };
 
     size_t total_frames_;

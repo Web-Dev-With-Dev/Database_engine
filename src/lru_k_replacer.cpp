@@ -132,6 +132,10 @@ size_t LRUKReplacer::GetEvictableCount() const {
     return cold_queue_.size() + hot_queue_.size();
 }
 
+size_t LRUKReplacer::GetEvictionCount() const {
+    return eviction_count_;
+}
+
 size_t LRUKReplacer::GetTotalFrames() const {
     return total_frames_;
 }
