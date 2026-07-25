@@ -147,7 +147,7 @@ void DiskManager::ReadPage(page_id_t page_id, char *buffer)
 
     std::streamsize bytes_read = db_file_.gcount();
 
-    if (bytes_read < PAGE_SIZE)
+    if (bytes_read < static_cast<std::streamsize>(PAGE_SIZE))
     {
         std::memset(buffer + bytes_read, 0, PAGE_SIZE - bytes_read);
 

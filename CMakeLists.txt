@@ -4,38 +4,227 @@ project(DatabaseEngine VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 
+# ==================== Include Directories ====================
 include_directories(include)
 
+# ==================== Source Files ====================
+set(COMMON_SOURCES
+    src/lru_k_replacer.cpp
+    src/page.cpp
+    src/disk_manager.cpp
+)
+
+set(COMMON_HEADERS
+    include/lru_k_replacer.h
+    include/page.h
+    include/disk_manager.h
+)
+
+# ==================== Main Executable ====================
 add_executable(database
     src/main.cpp
-    src/page.cpp
-    src/disk_manager.cpp
+    ${COMMON_SOURCES}
 )
 
+# ==================== Testing Setup ====================
 enable_testing()
 
+# Find Google Test
 find_package(GTest REQUIRED)
 
-add_executable(page_test
-    tests/page_test.cpp
-    src/page.cpp
+# Create a library with common sources for tests
+add_library(db_common STATIC
+    ${COMMON_SOURCES}
 )
 
-add_executable(disk_manager_test
-    tests/disk_manager_test.cpp
-    src/disk_manager.cpp
+target_include_directories(db_common PUBLIC
+    include
 )
 
-target_include_directories(page_test PRIVATE include)
+# ==================== Test Executables ====================
 
-target_link_libraries(page_test PRIVATE
-    GTest::gtest_main
+# 1. LRU-K Replacer Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/lru_k_replacer_test.cpp)
+    message(STATUS "Found lru_k_replacer_test.cpp")
+    add_executable(lru_k_replacer_test
+        tests/lru_k_replacer_test.cpp
+    )
+    
+    target_link_libraries(lru_k_replacer_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(lru_k_replacer_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(lru_k_replacer_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "lru_k_replacer_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/lru_k_replacer_test.cpp")
+endif()
+
+# 2. Page Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/page_test.cpp)
+    message(STATUS "Found page_test.cpp")
+    add_executable(page_test
+        tests/page_test.cpp
+    )
+    
+    target_link_libraries(page_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(page_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(page_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "page_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/page_test.cpp")
+endif()
+
+# 3. Disk Manager Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/disk_manager_test.cpp)
+    message(STATUS "Found disk_manager_test.cpp")
+    add_executable(disk_manager_test
+        tests/disk_manager_test.cpp
+    )
+    
+    target_link_libraries(disk_manager_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(disk_manager_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(disk_manager_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "disk_manager_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/disk_manager_test.cpp")
+endif()
+
+# 4. Integration Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.cpp)
+    message(STATUS "Found integration_test.cpp")
+    add_executable(integration_test
+        tests/integration_test.cpp
+    )
+    
+    target_link_libraries(integration_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(integration_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(integration_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "integration_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.cpp")
+endif()
+
+# ==================== Test Runner Targets ====================
+
+# Run LRU-K tests specifically
+add_custom_target(run_lru_k_test
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo "Running LRU-K Replacer Tests"
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ./lru_k_replacer_test
+    DEPENDS lru_k_replacer_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running LRU-K replacer tests"
 )
 
-target_link_libraries(disk_manager_test PRIVATE
-    GTest::gtest_main
+# Run all tests
+add_custom_target(run_all_tests
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo "Running ALL Tests"
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "1. Running LRU-K Replacer Tests..."
+    COMMAND ./lru_k_replacer_test || echo "LRU-K tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "2. Running Page Tests..."
+    COMMAND ./page_test || echo "Page tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "3. Running Disk Manager Tests..."
+    COMMAND ./disk_manager_test || echo "Disk Manager tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "4. Running Integration Tests..."
+    COMMAND ./integration_test || echo "Integration tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    DEPENDS 
+        lru_k_replacer_test
+        page_test
+        disk_manager_test
+        integration_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running all tests"
 )
 
-include(GoogleTest)
-gtest_discover_tests(page_test)
+# ==================== Code Coverage (Optional) ====================
+option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
+
+if(ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(STATUS "Enabling code coverage")
+        target_compile_options(lru_k_replacer_test PRIVATE --coverage)
+        target_link_options(lru_k_replacer_test PRIVATE --coverage)
+        
+        target_compile_options(page_test PRIVATE --coverage)
+        target_link_options(page_test PRIVATE --coverage)
+        
+        target_compile_options(disk_manager_test PRIVATE --coverage)
+        target_link_options(disk_manager_test PRIVATE --coverage)
+        
+        target_compile_options(integration_test PRIVATE --coverage)
+        target_link_options(integration_test PRIVATE --coverage)
+        
+        # Add a target for generating coverage report
+        find_program(GCOVR gcovr)
+        if(GCOVR)
+            add_custom_target(coverage
+                COMMAND ${GCOVR} --root .. --html --output coverage.html
+                COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated at coverage.html"
+                DEPENDS run_all_tests
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                COMMENT "Generating coverage report"
+            )
+        endif()
+    endif()
+endif()
+
+# ==================== Verbose Output Target ====================
+add_custom_target(show_tests
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo "Available Test Executables:"
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo "  1. lru_k_replacer_test.exe - LRU-K Replacer unit tests"
+    COMMAND ${CMAKE_COMMAND} -E echo "  2. page_test.exe - Page management tests"
+    COMMAND ${CMAKE_COMMAND} -E echo "  3. disk_manager_test.exe - Disk I/O tests"
+    COMMAND ${CMAKE_COMMAND} -E echo "  4. integration_test.exe - Integration tests"
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo "Commands:"
+    COMMAND ${CMAKE_COMMAND} -E echo "  make run_lru_k_test    - Run LRU-K tests only"
+    COMMAND ${CMAKE_COMMAND} -E echo "  make run_all_tests     - Run all tests"
+    COMMAND ${CMAKE_COMMAND} -E echo "  make show_tests        - Show this message"
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+)
