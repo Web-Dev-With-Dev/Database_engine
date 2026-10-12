@@ -5,6 +5,7 @@ project(DatabaseEngine VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ==================== Include Directories ====================
 include_directories(include)
@@ -14,12 +15,14 @@ set(COMMON_SOURCES
     src/lru_k_replacer.cpp
     src/page.cpp
     src/disk_manager.cpp
+    src/buffer_pool_manager.cpp
 )
 
 set(COMMON_HEADERS
     include/lru_k_replacer.h
     include/page.h
     include/disk_manager.h
+    include/buffer_pool_manager.h
 )
 
 # ==================== Main Executable ====================
@@ -137,6 +140,29 @@ else()
     message(WARNING "integration_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.cpp")
 endif()
 
+# 5. Buffer Pool Manager Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/buffer_pool_manager_test.cpp)
+    message(STATUS "Found buffer_pool_manager_test.cpp")
+    add_executable(buffer_pool_manager_test
+        tests/buffer_pool_manager_test.cpp
+    )
+    
+    target_link_libraries(buffer_pool_manager_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(buffer_pool_manager_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(buffer_pool_manager_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "buffer_pool_manager_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/buffer_pool_manager_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -168,6 +194,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "4. Running Integration Tests..."
     COMMAND ./integration_test || echo "Integration tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "5. Running Buffer Pool Manager Tests..."
+    COMMAND ./buffer_pool_manager_test || echo "Buffer Pool Manager tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -176,6 +205,7 @@ add_custom_target(run_all_tests
         page_test
         disk_manager_test
         integration_test
+        buffer_pool_manager_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )

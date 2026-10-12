@@ -1,0 +1,25 @@
+                     ┌───────────────────────┐
+                     │ FindAvailableFrame()  │
+                     └──────────┬────────────┘
+                                │
+                     Is free_list_ empty?
+                      /               \
+                    No                 Yes
+                   /                     \
+       Pop from free_list_        Call replacer_->Evict()
+               │                           │
+          frame_id                    victim_fid
+               │                      /          \
+               │                Got -1            Got valid fid
+               │                (All pinned)             │
+               │                   │              Is victim dirty?
+               │                   ▼               /             \
+               │              Return false       Yes              No
+               │             (Buffer full)        │                │
+               │                            WritePage(disk)        │
+               │                                  \               /
+               │                              Erase old pid from page_table_
+               │                                         │
+               └───────────────────┬─────────────────────┘
+                                   ▼
+                      Frame ready for new page
