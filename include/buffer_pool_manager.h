@@ -32,6 +32,17 @@ public:
     BufferPoolManager(BufferPoolManager &&) = delete;
     BufferPoolManager &operator=(BufferPoolManager &&) = delete;
 
+    /**
+     * @brief Fetch the requested page from the buffer pool.
+     * 1. Check if the page is already in the buffer pool (page table hit).
+     *    If found, pin it, record access, and return.
+     * 2. If page miss, find an available frame via free_list_ or replacer_->Evict()
+     *    (writing back dirty victim page to disk if needed).
+     * 3. Read the page from disk into the freed frame.
+     * 4. Update the page table, pin the page, record access, and return the Page pointer.
+     * @param page_id ID of the page to fetch.
+     * @return Pointer to the Page object, or nullptr if page cannot be fetched (e.g. invalid ID or all frames pinned).
+     */
     Page *FetchPage(page_id_t page_id);
 
     bool UnpinPage(page_id_t page_id, bool is_dirty);

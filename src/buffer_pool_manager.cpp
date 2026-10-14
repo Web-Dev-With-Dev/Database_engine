@@ -63,6 +63,10 @@ bool BufferPoolManager::FindAvailableFrame(frame_id_t *frame_id) {
 Page *BufferPoolManager::FetchPage(page_id_t page_id) {
     std::lock_guard<std::mutex> lock(latch_);
 
+    if (page_id == INVALID_PAGE_ID) {
+        return nullptr;
+    }
+
     // Check if the page is already in the buffer pool
     auto it = page_table_.find(page_id);
     if (it != page_table_.end()) {

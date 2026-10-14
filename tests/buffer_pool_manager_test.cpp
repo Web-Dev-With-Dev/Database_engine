@@ -122,6 +122,9 @@ TEST_F(BufferPoolManagerTest, FetchPageHitAndMiss) {
     const size_t pool_size = 2;
     BufferPoolManager bpm(pool_size, disk_manager_.get());
 
+    // Invalid page id returns nullptr
+    EXPECT_EQ(bpm.FetchPage(INVALID_PAGE_ID), nullptr);
+
     page_id_t pid0;
     Page *p0 = bpm.NewPage(&pid0);
     ASSERT_NE(p0, nullptr);
@@ -143,6 +146,20 @@ TEST_F(BufferPoolManagerTest, FetchPageHitAndMiss) {
 
     // Unpinning beyond 0 returns false
     EXPECT_FALSE(bpm.UnpinPage(pid0, false));
+
+    // When all frames are pinned and pool is full, FetchPage on a non-cached page returns nullptr
+    page_id_t pid1;
+    Page *p1 = bpm.NewPage(&pid1);
+    ASSERT_NE(p1, nullptr);
+
+    // Pin p0 again so both frames in pool are pinned
+    Page *p0_ref = bpm.FetchPage(pid0);
+    ASSERT_NE(p0_ref, nullptr);
+    EXPECT_EQ(p0->GetPinCount(), 1);
+    EXPECT_EQ(p1->GetPinCount(), 1);
+
+    // Both frames are pinned: FetchPage on miss should fail
+    EXPECT_EQ(bpm.FetchPage(999), nullptr);
 }
 
 TEST_F(BufferPoolManagerTest, FlushPageAndFlushAll) {
