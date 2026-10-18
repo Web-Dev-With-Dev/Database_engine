@@ -267,3 +267,137 @@ TEST_F(BufferPoolManagerTest, ConcurrentAccess) {
         bpm.UnpinPage(pid, false);
     }
 }
+
+TEST_F(BufferPoolManagerTest, PinUnpinOrderingNoDeadlock) {
+    const size_t pool_size = 4;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t pid0, pid1, pid2, pid3;
+    Page *p0 = bpm.NewPage(&pid0);
+    Page *p1 = bpm.NewPage(&pid1);
+    Page *p2 = bpm.NewPage(&pid2);
+    Page *p3 = bpm.NewPage(&pid3);
+    ASSERT_NE(p0, nullptr);
+    ASSERT_NE(p1, nullptr);
+    ASSERT_NE(p2, nullptr);
+    ASSERT_NE(p3, nullptr);
+
+    bpm.UnpinPage(pid0, false);
+    bpm.UnpinPage(pid1, false);
+    bpm.UnpinPage(pid2, false);
+    bpm.UnpinPage(pid3, false);
+
+    const int iterations = 300;
+
+    // Thread 1: Pin A -> Pin B, Unpin A -> Unpin B
+    auto t1_fn = [&]() {
+        for (int i = 0; i < iterations; ++i) {
+            Page *a = bpm.FetchPage(pid0);
+            Page *b = bpm.FetchPage(pid1);
+            ASSERT_NE(a, nullptr);
+            ASSERT_NE(b, nullptr);
+            bpm.UnpinPage(pid0, false);
+            bpm.UnpinPage(pid1, false);
+        }
+    };
+
+    // Thread 2: Pin B -> Pin A (reverse ordering), Unpin B -> Unpin A
+    auto t2_fn = [&]() {
+        for (int i = 0; i < iterations; ++i) {
+            Page *b = bpm.FetchPage(pid1);
+            Page *a = bpm.FetchPage(pid0);
+            ASSERT_NE(b, nullptr);
+            ASSERT_NE(a, nullptr);
+            bpm.UnpinPage(pid1, false);
+            bpm.UnpinPage(pid0, false);
+        }
+    };
+
+    // Thread 3: Pin C -> Pin D, Unpin D -> Unpin C (LIFO unpin)
+    auto t3_fn = [&]() {
+        for (int i = 0; i < iterations; ++i) {
+            Page *c = bpm.FetchPage(pid2);
+            Page *d = bpm.FetchPage(pid3);
+            ASSERT_NE(c, nullptr);
+            ASSERT_NE(d, nullptr);
+            bpm.UnpinPage(pid3, false);
+            bpm.UnpinPage(pid2, false);
+        }
+    };
+
+    // Thread 4: Pin D -> Pin A, Unpin A -> Unpin D (Cross-pair interleaved)
+    auto t4_fn = [&]() {
+        for (int i = 0; i < iterations; ++i) {
+            Page *d = bpm.FetchPage(pid3);
+            Page *a = bpm.FetchPage(pid0);
+            ASSERT_NE(d, nullptr);
+            ASSERT_NE(a, nullptr);
+            bpm.UnpinPage(pid0, false);
+            bpm.UnpinPage(pid3, false);
+        }
+    };
+
+    std::thread th1(t1_fn);
+    std::thread th2(t2_fn);
+    std::thread th3(t3_fn);
+    std::thread th4(t4_fn);
+
+    th1.join();
+    th2.join();
+    th3.join();
+    th4.join();
+
+    EXPECT_EQ(p0->GetPinCount(), 0);
+    EXPECT_EQ(p1->GetPinCount(), 0);
+    EXPECT_EQ(p2->GetPinCount(), 0);
+    EXPECT_EQ(p3->GetPinCount(), 0);
+}
+
+TEST_F(BufferPoolManagerTest, ConcurrentPinUnpinReplacerStress) {
+    const size_t pool_size = 3;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    // Create 6 pages on disk (more than pool size, requiring continuous eviction)
+    std::vector<page_id_t> page_ids;
+    for (int i = 0; i < 6; ++i) {
+        page_id_t pid;
+        Page *p = bpm.NewPage(&pid);
+        ASSERT_NE(p, nullptr);
+        page_ids.push_back(pid);
+        bpm.UnpinPage(pid, false);
+    }
+
+    const int iterations = 150;
+    auto stress_worker = [&](int thread_id) {
+        for (int i = 0; i < iterations; ++i) {
+            page_id_t pid = page_ids[(thread_id + i) % page_ids.size()];
+            Page *page = bpm.FetchPage(pid);
+            if (page != nullptr) {
+                page->WLatch();
+                page->GetData()[0] = static_cast<char>('A' + (thread_id % 26));
+                page->WUnlatch();
+                bpm.UnpinPage(pid, true);
+            }
+        }
+    };
+
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 6; ++t) {
+        workers.emplace_back(stress_worker, t);
+    }
+
+    for (auto &w : workers) {
+        w.join();
+    }
+
+    // Flush and verify all pages are unpinned and readable
+    bpm.FlushAllPages();
+    for (page_id_t pid : page_ids) {
+        Page *p = bpm.FetchPage(pid);
+        ASSERT_NE(p, nullptr);
+        EXPECT_EQ(p->GetPinCount(), 1);
+        bpm.UnpinPage(pid, false);
+        EXPECT_EQ(p->GetPinCount(), 0);
+    }
+}
+
