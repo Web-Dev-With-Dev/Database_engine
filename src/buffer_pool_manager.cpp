@@ -63,7 +63,7 @@ bool BufferPoolManager::FindAvailableFrame(frame_id_t *frame_id) {
 Page *BufferPoolManager::FetchPage(page_id_t page_id) {
     std::lock_guard<std::mutex> lock(latch_);
 
-    if (page_id == INVALID_PAGE_ID) {
+    if (page_id == INVALID_PAGE_ID || page_id < 0) {
         return nullptr;
     }
 
