@@ -16,6 +16,7 @@ set(COMMON_SOURCES
     src/page.cpp
     src/disk_manager.cpp
     src/buffer_pool_manager.cpp
+    src/table_page.cpp
 )
 
 set(COMMON_HEADERS
@@ -23,6 +24,9 @@ set(COMMON_HEADERS
     include/page.h
     include/disk_manager.h
     include/buffer_pool_manager.h
+    include/rid.h
+    include/tuple.h
+    include/table_page.h
 )
 
 # ==================== Main Executable ====================
@@ -161,6 +165,29 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/buffer_pool_manager_test.cpp)
     )
 else()
     message(WARNING "buffer_pool_manager_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/buffer_pool_manager_test.cpp")
+endif()
+
+# 6. Table Page Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/table_page_test.cpp)
+    message(STATUS "Found table_page_test.cpp")
+    add_executable(table_page_test
+        tests/table_page_test.cpp
+    )
+    
+    target_link_libraries(table_page_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(table_page_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(table_page_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "table_page_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/table_page_test.cpp")
 endif()
 
 # ==================== Test Runner Targets ====================

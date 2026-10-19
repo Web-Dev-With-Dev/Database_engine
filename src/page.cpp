@@ -30,6 +30,11 @@ char *Page::GetData()
     return data_.data();
 }
 
+const char *Page::GetData() const
+{
+    return data_.data();
+}
+
 //Setters
 
 void Page::SetPageId(page_id_t id)

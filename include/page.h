@@ -21,6 +21,7 @@ public:
     int GetPinCount() const;
     bool IsDirty() const;
     char *GetData();
+    const char *GetData() const;
 
     void SetPageId(page_id_t id);
     void SetDirty(bool dirty);
