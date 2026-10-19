@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 
  //History queue: Tracks recent accesses (count < k)
@@ -76,6 +77,8 @@ private:
     void AddToQueue(size_t frame_id);
     void RemoveFromQueue(size_t frame_id);
     size_t GetKthAccessTime(size_t frame_id) const;
+
+    mutable std::mutex replacer_latch_;
 };
 
 #endif

@@ -12,17 +12,17 @@ Page::Page()
 
 page_id_t Page::GetPageId() const
 {
-    return page_id_;
+    return page_id_.load();
 }
 
 int Page::GetPinCount() const
 {
-    return pin_count_;
+    return pin_count_.load();
 }
 
 bool Page::IsDirty() const
 {
-    return is_dirty_;
+    return is_dirty_.load();
 }
 
 char *Page::GetData()
@@ -34,12 +34,12 @@ char *Page::GetData()
 
 void Page::SetPageId(page_id_t id)
 {
-    page_id_ = id;
+    page_id_.store(id);
 }
 
 void Page::SetDirty(bool dirty)
 {
-    is_dirty_ = dirty;
+    is_dirty_.store(dirty);
 }
 
 //Pin Management
@@ -51,9 +51,9 @@ void Page::Pin()
 
 void Page::Unpin()
 {
-    if (pin_count_ > 0)
+    int current = pin_count_.load();
+    while (current > 0 && !pin_count_.compare_exchange_weak(current, current - 1))
     {
-        --pin_count_;
     }
 }
 

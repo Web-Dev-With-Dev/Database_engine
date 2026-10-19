@@ -17,6 +17,13 @@ std::unordered_map<std::string, std::weak_ptr<std::mutex>> file_mutexes_;
 
 std::shared_ptr<std::mutex> GetFileMutex(const std::string& path) {
     std::lock_guard<std::mutex> reg_lock(registry_mutex_);
+    for (auto it = file_mutexes_.begin(); it != file_mutexes_.end(); ) {
+        if (it->second.expired()) {
+            it = file_mutexes_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     auto& weak = file_mutexes_[path];
     auto shared = weak.lock();
     if (!shared) {
@@ -187,8 +194,12 @@ void DiskManager::ReadPage(page_id_t page_id, char *buffer)
 
 DiskManager::~DiskManager()
 {
-    if (db_file_.is_open())
+    if (file_mutex_)
     {
-        db_file_.close();
+        std::lock_guard<std::mutex> guard(*file_mutex_);
+        if (db_file_.is_open())
+        {
+            db_file_.close();
+        }
     }
 }

@@ -21,6 +21,7 @@ LRUKReplacer::LRUKReplacer(size_t num_frames, size_t k)
 }
 
 void LRUKReplacer::RecordAccess(size_t frame_id) {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     if (frame_id >= total_frames_) {
         throw std::out_of_range("Frame ID out of range");
     }
@@ -42,6 +43,7 @@ void LRUKReplacer::RecordAccess(size_t frame_id) {
 }
 
 void LRUKReplacer::Pin(size_t frame_id) {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     if (frame_id >= total_frames_) {
         throw std::out_of_range("Frame ID out of range");
     }
@@ -54,6 +56,7 @@ void LRUKReplacer::Pin(size_t frame_id) {
 }
 
 void LRUKReplacer::Unpin(size_t frame_id) {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     if (frame_id >= total_frames_) {
         throw std::out_of_range("Frame ID out of range");
     }
@@ -69,6 +72,7 @@ void LRUKReplacer::Unpin(size_t frame_id) {
 }
 
 int LRUKReplacer::Evict() {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     // Check cold queue first (frames with < k accesses)
     if (!cold_queue_.empty()) {
         int frame_id = cold_queue_.front();
@@ -106,6 +110,7 @@ int LRUKReplacer::Evict() {
 }
 
 void LRUKReplacer::SetEvictable(size_t frame_id, bool evictable) {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     if (frame_id >= total_frames_) {
         throw std::out_of_range("Frame ID out of range");
     }
@@ -129,10 +134,12 @@ void LRUKReplacer::SetEvictable(size_t frame_id, bool evictable) {
 }
 
 size_t LRUKReplacer::GetEvictableCount() const {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     return cold_queue_.size() + hot_queue_.size();
 }
 
 size_t LRUKReplacer::GetEvictionCount() const {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     return eviction_count_;
 }
 
@@ -141,6 +148,7 @@ size_t LRUKReplacer::GetTotalFrames() const {
 }
 
 bool LRUKReplacer::IsEvictable(size_t frame_id) const {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     if (frame_id >= total_frames_) {
         return false;
     }
@@ -148,6 +156,7 @@ bool LRUKReplacer::IsEvictable(size_t frame_id) const {
 }
 
 bool LRUKReplacer::IsPinned(size_t frame_id) const {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     if (frame_id >= total_frames_) {
         return false;
     }
@@ -155,6 +164,7 @@ bool LRUKReplacer::IsPinned(size_t frame_id) const {
 }
 
 size_t LRUKReplacer::GetAccessCount(size_t frame_id) const {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     if (frame_id >= total_frames_) {
         return 0;
     }
@@ -162,6 +172,7 @@ size_t LRUKReplacer::GetAccessCount(size_t frame_id) const {
 }
 
 void LRUKReplacer::Reset() {
+    std::lock_guard<std::mutex> lock(replacer_latch_);
     cold_queue_.clear();
     position_in_cold_.clear();
     hot_queue_.clear();

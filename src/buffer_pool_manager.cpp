@@ -26,7 +26,11 @@ BufferPoolManager::BufferPoolManager(size_t pool_size, std::shared_ptr<DiskManag
 }
 
 BufferPoolManager::~BufferPoolManager() {
-    FlushAllPages();
+    try {
+        FlushAllPages();
+    } catch (...) {
+        // Destructors must not throw
+    }
 }
 
 bool BufferPoolManager::FindAvailableFrame(frame_id_t *frame_id) {
@@ -49,8 +53,15 @@ bool BufferPoolManager::FindAvailableFrame(frame_id_t *frame_id) {
 
     // 3. If the victim page is dirty, write it back to disk
     if (victim_page.IsDirty()) {
-        disk_manager_->WritePage(victim_page.GetPageId(), victim_page.GetData());
-        victim_page.SetDirty(false);
+        try {
+            disk_manager_->WritePage(victim_page.GetPageId(), victim_page.GetData());
+            victim_page.SetDirty(false);
+        } catch (...) {
+            // Restore victim to replacer to prevent frame leak on I/O error
+            replacer_->RecordAccess(victim_fid);
+            replacer_->SetEvictable(victim_fid, true);
+            throw;
+        }
     }
 
     // 4. Remove victim page from page_table_ mapping
@@ -88,8 +99,15 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) {
     page.SetPageId(page_id);
     page.SetDirty(false);
 
-    // Read page data from disk
-    disk_manager_->ReadPage(page_id, page.GetData());
+    // Read page data from disk with exception safety
+    try {
+        disk_manager_->ReadPage(page_id, page.GetData());
+    } catch (...) {
+        page.SetPageId(INVALID_PAGE_ID);
+        page.SetDirty(false);
+        free_list_.push_back(frame_id);
+        throw;
+    }
 
     page.Pin();
     page_table_[page_id] = frame_id;
@@ -142,7 +160,17 @@ Page *BufferPoolManager::NewPage(page_id_t *page_id) {
         return nullptr;
     }
 
-    page_id_t new_page_id = disk_manager_->AllocatePage();
+    page_id_t new_page_id;
+    try {
+        new_page_id = disk_manager_->AllocatePage();
+    } catch (...) {
+        free_list_.push_back(frame_id);
+        if (page_id != nullptr) {
+            *page_id = INVALID_PAGE_ID;
+        }
+        throw;
+    }
+
     if (page_id != nullptr) {
         *page_id = new_page_id;
     }

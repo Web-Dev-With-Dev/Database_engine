@@ -401,3 +401,235 @@ TEST_F(BufferPoolManagerTest, ConcurrentPinUnpinReplacerStress) {
     }
 }
 
+TEST_F(BufferPoolManagerTest, EvictionCorrectnessLRUK) {
+    const size_t pool_size = 3;
+    const size_t k = 2;
+    BufferPoolManager bpm(pool_size, disk_manager_.get(), k);
+
+    // Create 3 pages to fill the buffer pool
+    page_id_t pid0, pid1, pid2;
+    bpm.NewPage(&pid0);  // Frame 0: accessed 1 time
+    bpm.NewPage(&pid1);  // Frame 1: accessed 1 time
+    bpm.NewPage(&pid2);  // Frame 2: accessed 1 time
+
+    // Promote pid0 and pid1 to hot queue with a 2nd access (k=2)
+    bpm.UnpinPage(pid0, false);
+    bpm.FetchPage(pid0);  // Frame 0: 2 accesses (hot queue)
+    bpm.UnpinPage(pid0, false);
+
+    bpm.UnpinPage(pid1, false);
+    bpm.FetchPage(pid1);  // Frame 1: 2 accesses (hot queue, more recent than frame 0)
+    bpm.UnpinPage(pid1, false);
+
+    // Page 2 has only 1 access (cold queue, backward distance = inf)
+    bpm.UnpinPage(pid2, false);
+
+    // Allocating a new page must evict Page 2 (from cold queue)
+    page_id_t pid3;
+    Page *p3 = bpm.NewPage(&pid3);
+    ASSERT_NE(p3, nullptr);
+    EXPECT_FALSE(bpm.IsPageInPool(pid2));
+    EXPECT_TRUE(bpm.IsPageInPool(pid0));
+    EXPECT_TRUE(bpm.IsPageInPool(pid1));
+    EXPECT_TRUE(bpm.IsPageInPool(pid3));
+
+    // Page 3 has 1 access (cold queue)
+    bpm.UnpinPage(pid3, false);
+
+    // Between page 3 (cold queue) and pages 0, 1 (hot queue):
+    // Next allocation must evict Page 3
+    page_id_t pid4;
+    Page *p4 = bpm.NewPage(&pid4);
+    ASSERT_NE(p4, nullptr);
+    EXPECT_FALSE(bpm.IsPageInPool(pid3));
+    EXPECT_TRUE(bpm.IsPageInPool(pid0));
+    EXPECT_TRUE(bpm.IsPageInPool(pid1));
+    EXPECT_TRUE(bpm.IsPageInPool(pid4));
+
+    // Promote page 4 to hot queue with a 2nd access
+    bpm.UnpinPage(pid4, false);
+    bpm.FetchPage(pid4);
+    bpm.UnpinPage(pid4, false);
+
+    // All pages in pool (0, 1, 4) are now in hot queue.
+    // Order of 2nd accesses: frame 0 (oldest), frame 1 (middle), frame 4 (newest).
+    // Page 0 has the oldest k-th access time and must be evicted!
+    page_id_t pid5;
+    Page *p5 = bpm.NewPage(&pid5);
+    ASSERT_NE(p5, nullptr);
+    EXPECT_FALSE(bpm.IsPageInPool(pid0));
+    EXPECT_TRUE(bpm.IsPageInPool(pid1));
+    EXPECT_TRUE(bpm.IsPageInPool(pid4));
+    EXPECT_TRUE(bpm.IsPageInPool(pid5));
+
+    bpm.UnpinPage(pid1, false);
+    bpm.UnpinPage(pid4, false);
+    bpm.UnpinPage(pid5, false);
+}
+
+TEST_F(BufferPoolManagerTest, DirtyPageFlushOnEvict) {
+    const size_t pool_size = 2;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t pid0, pid1;
+    Page *p0 = bpm.NewPage(&pid0);
+    Page *p1 = bpm.NewPage(&pid1);
+    ASSERT_NE(p0, nullptr);
+    ASSERT_NE(p1, nullptr);
+
+    // Write distinct data
+    std::snprintf(p0->GetData(), PAGE_SIZE, "Persistent Dirty Data Pid 0");
+    std::snprintf(p1->GetData(), PAGE_SIZE, "Clean Data Pid 1");
+
+    // Unpin pid0 as dirty, pid1 as clean
+    EXPECT_TRUE(bpm.UnpinPage(pid0, true));
+    EXPECT_TRUE(bpm.UnpinPage(pid1, false));
+
+    // Allocate page 2: forces eviction of pid0 (first in cold queue).
+    // Because pid0 is dirty, its content MUST be written back to disk during eviction.
+    page_id_t pid2;
+    Page *p2 = bpm.NewPage(&pid2);
+    ASSERT_NE(p2, nullptr);
+    EXPECT_FALSE(bpm.IsPageInPool(pid0));
+
+    // Verify disk content for pid0 directly using DiskManager
+    char disk_check[PAGE_SIZE] = {};
+    disk_manager_->ReadPage(pid0, disk_check);
+    EXPECT_STREQ(disk_check, "Persistent Dirty Data Pid 0");
+
+    // Allocate page 3: forces eviction of pid1 (clean page)
+    page_id_t pid3;
+    Page *p3 = bpm.NewPage(&pid3);
+    ASSERT_NE(p3, nullptr);
+    EXPECT_FALSE(bpm.IsPageInPool(pid1));
+
+    bpm.UnpinPage(pid2, false);
+    bpm.UnpinPage(pid3, false);
+
+    // Fetch pid0 back into the pool from disk and verify its content matches exactly
+    Page *fetched_p0 = bpm.FetchPage(pid0);
+    ASSERT_NE(fetched_p0, nullptr);
+    EXPECT_STREQ(fetched_p0->GetData(), "Persistent Dirty Data Pid 0");
+    // Initially loaded page from disk must not be dirty
+    EXPECT_FALSE(fetched_p0->IsDirty());
+
+    bpm.UnpinPage(pid0, false);
+}
+
+TEST_F(BufferPoolManagerTest, PinCountTrackingComprehensive) {
+    const size_t pool_size = 3;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t pid0;
+    Page *p0 = bpm.NewPage(&pid0);
+    ASSERT_NE(p0, nullptr);
+    EXPECT_EQ(p0->GetPinCount(), 1);
+
+    // Multiple fetches on the same page increment pin count
+    Page *fetch1 = bpm.FetchPage(pid0);
+    EXPECT_EQ(fetch1, p0);
+    EXPECT_EQ(p0->GetPinCount(), 2);
+
+    Page *fetch2 = bpm.FetchPage(pid0);
+    EXPECT_EQ(fetch2, p0);
+    EXPECT_EQ(p0->GetPinCount(), 3);
+
+    // Deleting page while pin_count > 0 must fail
+    EXPECT_FALSE(bpm.DeletePage(pid0));
+    EXPECT_TRUE(bpm.IsPageInPool(pid0));
+
+    // Successive unpins decrement pin count accurately
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_EQ(p0->GetPinCount(), 2);
+
+    // Unpinning with dirty=true sets the dirty flag
+    EXPECT_FALSE(p0->IsDirty());
+    EXPECT_TRUE(bpm.UnpinPage(pid0, true));
+    EXPECT_EQ(p0->GetPinCount(), 1);
+    EXPECT_TRUE(p0->IsDirty());
+
+    // Subsequent unpin with dirty=false must NOT clear earlier dirty state
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_EQ(p0->GetPinCount(), 0);
+    EXPECT_TRUE(p0->IsDirty());
+
+    // Unpinning when pin_count is already 0 must return false and not underflow
+    EXPECT_FALSE(bpm.UnpinPage(pid0, false));
+    EXPECT_FALSE(bpm.UnpinPage(pid0, true));
+    EXPECT_EQ(p0->GetPinCount(), 0);
+
+    // Now that pin_count is 0, DeletePage must succeed
+    EXPECT_TRUE(bpm.DeletePage(pid0));
+    EXPECT_FALSE(bpm.IsPageInPool(pid0));
+}
+
+TEST_F(BufferPoolManagerTest, AllPagesPinnedEdgeCases) {
+    const size_t pool_size = 2;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t pid0, pid1;
+    Page *p0 = bpm.NewPage(&pid0);
+    Page *p1 = bpm.NewPage(&pid1);
+    ASSERT_NE(p0, nullptr);
+    ASSERT_NE(p1, nullptr);
+
+    EXPECT_EQ(p0->GetPinCount(), 1);
+    EXPECT_EQ(p1->GetPinCount(), 1);
+    EXPECT_EQ(bpm.GetFreeListSize(), 0);
+
+    // Edge Case 1: NewPage fails and sets out-parameter to INVALID_PAGE_ID
+    page_id_t pid_fail = 999;
+    Page *p_fail = bpm.NewPage(&pid_fail);
+    EXPECT_EQ(p_fail, nullptr);
+    EXPECT_EQ(pid_fail, INVALID_PAGE_ID);
+
+    // Edge Case 2: FetchPage on un-cached page fails when all frames are pinned
+    EXPECT_EQ(bpm.FetchPage(42), nullptr);
+
+    // Edge Case 3: FetchPage on CACHED page succeeds and increments pin count
+    Page *p0_hit = bpm.FetchPage(pid0);
+    ASSERT_EQ(p0_hit, p0);
+    EXPECT_EQ(p0->GetPinCount(), 2);
+
+    // Edge Case 4: DeletePage fails on any pinned page
+    EXPECT_FALSE(bpm.DeletePage(pid0));
+    EXPECT_FALSE(bpm.DeletePage(pid1));
+    EXPECT_TRUE(bpm.IsPageInPool(pid0));
+    EXPECT_TRUE(bpm.IsPageInPool(pid1));
+
+    // Edge Case 5: FlushPage still succeeds while pinned
+    std::snprintf(p0->GetData(), PAGE_SIZE, "Flushed While Pinned");
+    p0->SetDirty(true);
+    EXPECT_TRUE(bpm.FlushPage(pid0));
+    EXPECT_FALSE(p0->IsDirty());
+    EXPECT_EQ(p0->GetPinCount(), 2);  // Pin count unchanged
+
+    // Edge Case 6: Unpinning only ONE page allows eviction
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_EQ(p0->GetPinCount(), 1);
+    // Still pinned (count 1): NewPage still fails
+    EXPECT_EQ(bpm.NewPage(nullptr), nullptr);
+
+    // Unpin pid0 completely (count -> 0)
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_EQ(p0->GetPinCount(), 0);
+
+    // Now exactly pid0 is evictable; pid1 remains pinned!
+    page_id_t pid2;
+    Page *p2 = bpm.NewPage(&pid2);
+    ASSERT_NE(p2, nullptr);
+    EXPECT_EQ(p2->GetPageId(), pid2);
+
+    // pid0 was evicted, pid1 is still safely pinned in pool
+    EXPECT_FALSE(bpm.IsPageInPool(pid0));
+    EXPECT_TRUE(bpm.IsPageInPool(pid1));
+    EXPECT_TRUE(bpm.IsPageInPool(pid2));
+    EXPECT_EQ(p1->GetPinCount(), 1);
+    EXPECT_EQ(p2->GetPinCount(), 1);
+
+    // Clean up
+    bpm.UnpinPage(pid1, false);
+    bpm.UnpinPage(pid2, false);
+}
+
+
