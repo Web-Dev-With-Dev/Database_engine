@@ -89,6 +89,8 @@ public:
     void SetNumTuples(uint32_t num_tuples);
 
     uint32_t GetFreeSpaceRemaining() const;
+    uint32_t GetTotalFreeSpace() const;
+    uint32_t GetFragmentedSpace() const;
 
     // Slot Directory Access
     uint32_t GetTupleOffset(uint32_t slot_id) const;
@@ -120,6 +122,7 @@ public:
 
     // Compaction / Defragmentation
     void Defragment();
+    static void Defragment(char *data);
 
     // Raw static helper functions on arbitrary char* buffers
     static void Init(char *data, page_id_t page_id, page_id_t prev_page_id = INVALID_PAGE_ID, page_id_t next_page_id = INVALID_PAGE_ID);
@@ -130,6 +133,14 @@ public:
     static uint32_t GetNumTuples(const char *data);
     static void SetNumTuples(char *data, uint32_t num_tuples);
     static uint32_t GetFreeSpaceRemaining(const char *data);
+    static uint32_t GetTotalFreeSpace(const char *data);
+    static uint32_t GetFragmentedSpace(const char *data);
+
+    static uint32_t GetTupleOffset(const char *data, uint32_t slot_id);
+    static void SetTupleOffset(char *data, uint32_t slot_id, uint32_t offset);
+    static uint32_t GetTupleSize(const char *data, uint32_t slot_id);
+    static void SetTupleSize(char *data, uint32_t slot_id, uint32_t size);
+    static bool IsTupleDeleted(const char *data, uint32_t slot_id);
 };
 
 // Ensure TablePage adds no non-static members so reinterpret_cast from Page* is standard-layout compatible

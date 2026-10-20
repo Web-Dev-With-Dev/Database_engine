@@ -190,6 +190,29 @@ else()
     message(WARNING "table_page_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/table_page_test.cpp")
 endif()
 
+# 7. RID Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/rid_test.cpp)
+    message(STATUS "Found rid_test.cpp")
+    add_executable(rid_test
+        tests/rid_test.cpp
+    )
+    
+    target_link_libraries(rid_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(rid_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(rid_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "rid_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/rid_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -224,6 +247,12 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "5. Running Buffer Pool Manager Tests..."
     COMMAND ./buffer_pool_manager_test || echo "Buffer Pool Manager tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "6. Running Table Page Tests..."
+    COMMAND ./table_page_test || echo "Table Page tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "7. Running RID Tests..."
+    COMMAND ./rid_test || echo "RID tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -233,6 +262,8 @@ add_custom_target(run_all_tests
         disk_manager_test
         integration_test
         buffer_pool_manager_test
+        table_page_test
+        rid_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )

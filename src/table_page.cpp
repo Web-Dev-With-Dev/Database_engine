@@ -17,7 +17,7 @@ void TablePage::Init(char *data, page_id_t page_id, page_id_t prev_page_id, page
 }
 
 page_id_t TablePage::GetTablePageId() const {
-    return GetTablePageId(const_cast<TablePage *>(this)->GetData());
+    return GetTablePageId(GetData());
 }
 
 page_id_t TablePage::GetTablePageId(const char *data) {
@@ -35,7 +35,7 @@ void TablePage::SetTablePageId(char *data, page_id_t page_id) {
 }
 
 uint32_t TablePage::GetLSN() const {
-    return *reinterpret_cast<const uint32_t *>(const_cast<TablePage *>(this)->GetData() + OFFSET_LSN);
+    return *reinterpret_cast<const uint32_t *>(GetData() + OFFSET_LSN);
 }
 
 void TablePage::SetLSN(uint32_t lsn) {
@@ -44,7 +44,7 @@ void TablePage::SetLSN(uint32_t lsn) {
 }
 
 page_id_t TablePage::GetPrevPageId() const {
-    return *reinterpret_cast<const page_id_t *>(const_cast<TablePage *>(this)->GetData() + OFFSET_PREV_PAGE_ID);
+    return *reinterpret_cast<const page_id_t *>(GetData() + OFFSET_PREV_PAGE_ID);
 }
 
 void TablePage::SetPrevPageId(page_id_t prev_page_id) {
@@ -53,7 +53,7 @@ void TablePage::SetPrevPageId(page_id_t prev_page_id) {
 }
 
 page_id_t TablePage::GetNextPageId() const {
-    return *reinterpret_cast<const page_id_t *>(const_cast<TablePage *>(this)->GetData() + OFFSET_NEXT_PAGE_ID);
+    return *reinterpret_cast<const page_id_t *>(GetData() + OFFSET_NEXT_PAGE_ID);
 }
 
 void TablePage::SetNextPageId(page_id_t next_page_id) {
@@ -62,7 +62,7 @@ void TablePage::SetNextPageId(page_id_t next_page_id) {
 }
 
 uint32_t TablePage::GetFreeSpacePointer() const {
-    return GetFreeSpacePointer(const_cast<TablePage *>(this)->GetData());
+    return GetFreeSpacePointer(GetData());
 }
 
 uint32_t TablePage::GetFreeSpacePointer(const char *data) {
@@ -79,7 +79,7 @@ void TablePage::SetFreeSpacePointer(char *data, uint32_t free_space_pointer) {
 }
 
 uint32_t TablePage::GetNumTuples() const {
-    return GetNumTuples(const_cast<TablePage *>(this)->GetData());
+    return GetNumTuples(GetData());
 }
 
 uint32_t TablePage::GetNumTuples(const char *data) {
@@ -96,7 +96,7 @@ void TablePage::SetNumTuples(char *data, uint32_t num_tuples) {
 }
 
 uint32_t TablePage::GetFreeSpaceRemaining() const {
-    return GetFreeSpaceRemaining(const_cast<TablePage *>(this)->GetData());
+    return GetFreeSpaceRemaining(GetData());
 }
 
 uint32_t TablePage::GetFreeSpaceRemaining(const char *data) {
@@ -109,41 +109,94 @@ uint32_t TablePage::GetFreeSpaceRemaining(const char *data) {
     return free_ptr - slot_end;
 }
 
+uint32_t TablePage::GetTotalFreeSpace() const {
+    return GetTotalFreeSpace(GetData());
+}
+
+uint32_t TablePage::GetTotalFreeSpace(const char *data) {
+    uint32_t num_tuples = GetNumTuples(data);
+    uint32_t active_bytes = 0;
+    int last_active_slot = -1;
+
+    for (uint32_t i = 0; i < num_tuples; ++i) {
+        if (!IsTupleDeleted(data, i) && GetTupleSize(data, i) > 0 && GetTupleOffset(data, i) > 0) {
+            active_bytes += GetTupleSize(data, i);
+            last_active_slot = static_cast<int>(i);
+        }
+    }
+
+    uint32_t compacted_num_slots = (last_active_slot == -1) ? 0 : static_cast<uint32_t>(last_active_slot + 1);
+    uint32_t used_space = static_cast<uint32_t>(SIZE_TABLE_PAGE_HEADER + compacted_num_slots * SIZEOF_TUPLE_SLOT + active_bytes);
+
+    if (used_space >= PAGE_SIZE) {
+        return 0;
+    }
+    return static_cast<uint32_t>(PAGE_SIZE) - used_space;
+}
+
+uint32_t TablePage::GetFragmentedSpace() const {
+    return GetFragmentedSpace(GetData());
+}
+
+uint32_t TablePage::GetFragmentedSpace(const char *data) {
+    uint32_t total_free = GetTotalFreeSpace(data);
+    uint32_t contig_free = GetFreeSpaceRemaining(data);
+    if (total_free > contig_free) {
+        return total_free - contig_free;
+    }
+    return 0;
+}
+
 uint32_t TablePage::GetTupleOffset(uint32_t slot_id) const {
-    const char *data = const_cast<TablePage *>(this)->GetData();
+    return GetTupleOffset(GetData(), slot_id);
+}
+
+uint32_t TablePage::GetTupleOffset(const char *data, uint32_t slot_id) {
     size_t slot_offset = SIZE_TABLE_PAGE_HEADER + slot_id * SIZEOF_TUPLE_SLOT + OFFSET_SLOT_OFFSET;
     return *reinterpret_cast<const uint32_t *>(data + slot_offset);
 }
 
 void TablePage::SetTupleOffset(uint32_t slot_id, uint32_t offset) {
-    char *data = GetData();
-    size_t slot_offset = SIZE_TABLE_PAGE_HEADER + slot_id * SIZEOF_TUPLE_SLOT + OFFSET_SLOT_OFFSET;
-    *reinterpret_cast<uint32_t *>(data + slot_offset) = offset;
+    SetTupleOffset(GetData(), slot_id, offset);
     SetDirty(true);
 }
 
+void TablePage::SetTupleOffset(char *data, uint32_t slot_id, uint32_t offset) {
+    size_t slot_offset = SIZE_TABLE_PAGE_HEADER + slot_id * SIZEOF_TUPLE_SLOT + OFFSET_SLOT_OFFSET;
+    *reinterpret_cast<uint32_t *>(data + slot_offset) = offset;
+}
+
 uint32_t TablePage::GetTupleSize(uint32_t slot_id) const {
-    const char *data = const_cast<TablePage *>(this)->GetData();
+    return GetTupleSize(GetData(), slot_id);
+}
+
+uint32_t TablePage::GetTupleSize(const char *data, uint32_t slot_id) {
     size_t slot_offset = SIZE_TABLE_PAGE_HEADER + slot_id * SIZEOF_TUPLE_SLOT + OFFSET_SLOT_SIZE;
     uint32_t raw_size = *reinterpret_cast<const uint32_t *>(data + slot_offset);
     return raw_size & ~DELETE_MASK;
 }
 
 void TablePage::SetTupleSize(uint32_t slot_id, uint32_t size) {
-    char *data = GetData();
-    size_t slot_offset = SIZE_TABLE_PAGE_HEADER + slot_id * SIZEOF_TUPLE_SLOT + OFFSET_SLOT_SIZE;
-    *reinterpret_cast<uint32_t *>(data + slot_offset) = size;
+    SetTupleSize(GetData(), slot_id, size);
     SetDirty(true);
 }
 
+void TablePage::SetTupleSize(char *data, uint32_t slot_id, uint32_t size) {
+    size_t slot_offset = SIZE_TABLE_PAGE_HEADER + slot_id * SIZEOF_TUPLE_SLOT + OFFSET_SLOT_SIZE;
+    *reinterpret_cast<uint32_t *>(data + slot_offset) = size;
+}
+
 bool TablePage::IsTupleDeleted(uint32_t slot_id) const {
-    if (slot_id >= GetNumTuples()) {
+    return IsTupleDeleted(GetData(), slot_id);
+}
+
+bool TablePage::IsTupleDeleted(const char *data, uint32_t slot_id) {
+    if (slot_id >= GetNumTuples(data)) {
         return true;
     }
-    const char *data = GetData();
     size_t slot_offset = SIZE_TABLE_PAGE_HEADER + slot_id * SIZEOF_TUPLE_SLOT + OFFSET_SLOT_SIZE;
     uint32_t raw_size = *reinterpret_cast<const uint32_t *>(data + slot_offset);
-    return (raw_size & DELETE_MASK) != 0 || (GetTupleOffset(slot_id) == 0 && (raw_size & ~DELETE_MASK) == 0);
+    return (raw_size & DELETE_MASK) != 0 || GetTupleOffset(data, slot_id) == 0 || (raw_size & ~DELETE_MASK) == 0;
 }
 
 TupleSlot TablePage::GetSlot(uint32_t slot_id) const {
@@ -180,7 +233,53 @@ bool TablePage::InsertTuple(std::span<const char> tuple_bytes, RID *rid) {
 
     uint32_t needed_space = tuple_len + (reuse_slot ? 0 : SIZEOF_TUPLE_SLOT);
     if (GetFreeSpaceRemaining() < needed_space) {
-        return false;
+        // Contiguous free space is insufficient.
+        // Check if compaction / defragmentation can reclaim enough space.
+        int last_active_slot = -1;
+        uint32_t active_bytes = 0;
+        for (uint32_t i = 0; i < num_tuples; ++i) {
+            if (!IsTupleDeleted(i) && GetTupleSize(i) > 0 && GetTupleOffset(i) > 0) {
+                active_bytes += GetTupleSize(i);
+                last_active_slot = static_cast<int>(i);
+            }
+        }
+        uint32_t compacted_num_slots = (last_active_slot == -1) ? 0 : static_cast<uint32_t>(last_active_slot + 1);
+
+        bool will_have_reusable_slot = false;
+        for (uint32_t i = 0; i < compacted_num_slots; ++i) {
+            if (IsTupleDeleted(i) || GetTupleSize(i) == 0 || GetTupleOffset(i) == 0) {
+                will_have_reusable_slot = true;
+                break;
+            }
+        }
+
+        uint32_t needed_after_compact = tuple_len + (will_have_reusable_slot ? 0 : SIZEOF_TUPLE_SLOT);
+        uint32_t used_after_compact = static_cast<uint32_t>(SIZE_TABLE_PAGE_HEADER + compacted_num_slots * SIZEOF_TUPLE_SLOT + active_bytes);
+        uint32_t available_after_compact = (PAGE_SIZE >= used_after_compact) ? (static_cast<uint32_t>(PAGE_SIZE) - used_after_compact) : 0;
+
+        if (available_after_compact < needed_after_compact) {
+            return false;
+        }
+
+        // Defragment the page to compact free space and reclaim dead/deleted slots
+        Defragment();
+
+        // Refresh state after defragmentation
+        num_tuples = GetNumTuples();
+        slot_id = num_tuples;
+        reuse_slot = false;
+        for (uint32_t i = 0; i < num_tuples; ++i) {
+            if (GetTupleOffset(i) == 0 && GetTupleSize(i) == 0) {
+                slot_id = i;
+                reuse_slot = true;
+                break;
+            }
+        }
+
+        needed_space = tuple_len + (reuse_slot ? 0 : SIZEOF_TUPLE_SLOT);
+        if (GetFreeSpaceRemaining() < needed_space) {
+            return false;
+        }
     }
 
     // Allocate tuple at bottom of free space
@@ -208,6 +307,9 @@ bool TablePage::InsertTuple(std::span<const char> tuple_bytes, RID *rid) {
 }
 
 bool TablePage::GetTuple(const RID &rid, Tuple *tuple) const {
+    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+        return false;
+    }
     uint32_t slot_id = rid.GetSlotNum();
     if (slot_id >= GetNumTuples()) {
         return false;
@@ -230,6 +332,9 @@ bool TablePage::GetTuple(const RID &rid, Tuple *tuple) const {
 }
 
 bool TablePage::UpdateTuple(const Tuple &new_tuple, Tuple *old_tuple, const RID &rid) {
+    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+        return false;
+    }
     uint32_t slot_id = rid.GetSlotNum();
     if (slot_id >= GetNumTuples() || IsTupleDeleted(slot_id)) {
         return false;
@@ -254,7 +359,34 @@ bool TablePage::UpdateTuple(const Tuple &new_tuple, Tuple *old_tuple, const RID 
 
     // Needs more space
     if (GetFreeSpaceRemaining() < new_len) {
-        return false;
+        // Save current tuple contents and temporarily mark slot deleted to assess compaction
+        std::vector<char> new_bytes(new_tuple.GetData(), new_tuple.GetData() + new_len);
+        SetTupleOffset(slot_id, 0);
+        SetTupleSize(slot_id, 0);
+
+        if (GetTotalFreeSpace() < new_len) {
+            // Restore old slot info and fail
+            SetTupleOffset(slot_id, old_offset);
+            SetTupleSize(slot_id, old_size);
+            return false;
+        }
+
+        Defragment();
+
+        // After defragmentation, allocate new space
+        uint32_t free_ptr = GetFreeSpacePointer();
+        free_ptr -= new_len;
+        SetFreeSpacePointer(free_ptr);
+
+        std::memcpy(GetData() + free_ptr, new_bytes.data(), new_len);
+        SetTupleOffset(slot_id, free_ptr);
+        SetTupleSize(slot_id, new_len);
+        if (slot_id >= GetNumTuples()) {
+            SetNumTuples(slot_id + 1);
+        }
+
+        SetDirty(true);
+        return true;
     }
 
     uint32_t free_ptr = GetFreeSpacePointer();
@@ -274,6 +406,9 @@ bool TablePage::UpdateTuple(const Tuple &new_tuple, const RID &rid) {
 }
 
 bool TablePage::MarkDelete(const RID &rid) {
+    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+        return false;
+    }
     uint32_t slot_id = rid.GetSlotNum();
     if (slot_id >= GetNumTuples() || IsTupleDeleted(slot_id)) {
         return false;
@@ -287,6 +422,9 @@ bool TablePage::MarkDelete(const RID &rid) {
 }
 
 bool TablePage::ApplyDelete(const RID &rid) {
+    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+        return false;
+    }
     uint32_t slot_id = rid.GetSlotNum();
     if (slot_id >= GetNumTuples()) {
         return false;
@@ -298,6 +436,9 @@ bool TablePage::ApplyDelete(const RID &rid) {
 }
 
 bool TablePage::RollbackDelete(const RID &rid) {
+    if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
+        return false;
+    }
     uint32_t slot_id = rid.GetSlotNum();
     if (slot_id >= GetNumTuples()) {
         return false;
@@ -340,36 +481,39 @@ bool TablePage::GetNextTupleRid(const RID &cur_rid, RID *next_rid) const {
 }
 
 void TablePage::Defragment() {
-    uint32_t num_tuples = GetNumTuples();
+    Defragment(GetData());
+    SetDirty(true);
+}
+
+void TablePage::Defragment(char *data) {
+    uint32_t num_tuples = GetNumTuples(data);
     char temp[PAGE_SIZE];
     uint32_t new_free_ptr = static_cast<uint32_t>(PAGE_SIZE);
 
     for (uint32_t i = 0; i < num_tuples; ++i) {
-        if (!IsTupleDeleted(i) && GetTupleSize(i) > 0 && GetTupleOffset(i) > 0) {
-            uint32_t size = GetTupleSize(i);
-            uint32_t old_offset = GetTupleOffset(i);
+        if (!IsTupleDeleted(data, i) && GetTupleSize(data, i) > 0 && GetTupleOffset(data, i) > 0) {
+            uint32_t size = GetTupleSize(data, i);
+            uint32_t old_offset = GetTupleOffset(data, i);
             new_free_ptr -= size;
 
-            std::memcpy(temp + new_free_ptr, GetData() + old_offset, size);
-            SetTupleOffset(i, new_free_ptr);
+            std::memcpy(temp + new_free_ptr, data + old_offset, size);
+            SetTupleOffset(data, i, new_free_ptr);
         } else {
-            SetTupleOffset(i, 0);
-            SetTupleSize(i, 0);
+            SetTupleOffset(data, i, 0);
+            SetTupleSize(data, i, 0);
         }
     }
 
     uint32_t packed_bytes = static_cast<uint32_t>(PAGE_SIZE) - new_free_ptr;
     if (packed_bytes > 0) {
-        std::memcpy(GetData() + new_free_ptr, temp + new_free_ptr, packed_bytes);
+        std::memcpy(data + new_free_ptr, temp + new_free_ptr, packed_bytes);
     }
 
-    SetFreeSpacePointer(new_free_ptr);
+    SetFreeSpacePointer(data, new_free_ptr);
 
     // Reclaim trailing deleted slots
-    while (num_tuples > 0 && GetTupleOffset(num_tuples - 1) == 0 && GetTupleSize(num_tuples - 1) == 0) {
+    while (num_tuples > 0 && GetTupleOffset(data, num_tuples - 1) == 0 && GetTupleSize(data, num_tuples - 1) == 0) {
         num_tuples--;
     }
-    SetNumTuples(num_tuples);
-
-    SetDirty(true);
+    SetNumTuples(data, num_tuples);
 }

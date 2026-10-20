@@ -363,3 +363,214 @@ TEST_F(TablePageTest, BufferPoolManagerPersistence) {
         std::filesystem::remove(db_file);
     }
 }
+
+TEST_F(TablePageTest, FreeSpaceAndFragmentationCalculations) {
+    TablePage page;
+    page.Init(1);
+
+    // Initial state: empty page
+    uint32_t expected_initial_free = PAGE_SIZE - TablePage::SIZE_TABLE_PAGE_HEADER;
+    EXPECT_EQ(page.GetFreeSpaceRemaining(), expected_initial_free);
+    EXPECT_EQ(page.GetTotalFreeSpace(), expected_initial_free);
+    EXPECT_EQ(page.GetFragmentedSpace(), 0);
+
+    // Insert 3 tuples of 500 bytes each
+    RID r0, r1, r2;
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(500, 'A')), &r0));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(500, 'B')), &r1));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(500, 'C')), &r2));
+
+    // Slots: 3 * 8 = 24 bytes. Tuples: 1500 bytes.
+    // Total used: 24 (hdr) + 24 (slots) + 1500 = 1548 bytes.
+    // Free space remaining: 4096 - 1548 = 2548.
+    EXPECT_EQ(page.GetFreeSpaceRemaining(), 2548);
+    EXPECT_EQ(page.GetTotalFreeSpace(), 2548);
+    EXPECT_EQ(page.GetFragmentedSpace(), 0);
+
+    // Mark delete tuple 1 (500 bytes)
+    EXPECT_TRUE(page.MarkDelete(r1));
+    EXPECT_TRUE(page.IsTupleDeleted(r1.GetSlotNum()));
+
+    // Contiguous free space remains 2548, but total free space is 2548 + 500 = 3048
+    EXPECT_EQ(page.GetFreeSpaceRemaining(), 2548);
+    EXPECT_EQ(page.GetTotalFreeSpace(), 3048);
+    EXPECT_EQ(page.GetFragmentedSpace(), 500);
+
+    // Mark delete tuple 2 (both slots 1 and 2 now become trailing deleted slots: 500 bytes + 2 * 8 bytes slot reclamation)
+    EXPECT_TRUE(page.MarkDelete(r2));
+    EXPECT_EQ(page.GetFreeSpaceRemaining(), 2548);
+    EXPECT_EQ(page.GetTotalFreeSpace(), 3048 + 500 + 2 * TablePage::SIZEOF_TUPLE_SLOT);
+    EXPECT_EQ(page.GetFragmentedSpace(), 1016);
+
+    // Manual defragmentation consolidates all free space
+    page.Defragment();
+    EXPECT_EQ(page.GetFragmentedSpace(), 0);
+    EXPECT_EQ(page.GetFreeSpaceRemaining(), page.GetTotalFreeSpace());
+    EXPECT_EQ(page.GetNumTuples(), 1); // Trailing slots r1 and r2 truncated
+
+    // Live tuple r0 is still readable
+    Tuple out;
+    EXPECT_TRUE(page.GetTuple(r0, &out));
+    EXPECT_EQ(out.AsStringView(), std::string(500, 'A'));
+}
+
+TEST_F(TablePageTest, InsertTupleCompactionOnMarkDelete) {
+    TablePage page;
+    page.Init(1);
+
+    // Fill page almost completely with 4 tuples of 950 bytes
+    // Total tuple data: 4 * 950 = 3800 bytes
+    // Header (24) + Slots (4 * 8 = 32) + 3800 = 3856 bytes used
+    // Contiguous free space: 4096 - 3856 = 240 bytes
+    RID r0, r1, r2, r3;
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(950, '0')), &r0));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(950, '1')), &r1));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(950, '2')), &r2));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(950, '3')), &r3));
+
+    EXPECT_EQ(page.GetFreeSpaceRemaining(), 240);
+
+    // Mark delete r1 (950 bytes dead in the middle)
+    EXPECT_TRUE(page.MarkDelete(r1));
+
+    // Try to insert an 800-byte tuple.
+    // Contiguous space is only 240 bytes (< 800), but total free space is 240 + 950 = 1190 bytes (>= 800).
+    // InsertTuple must automatically trigger defragmentation/compaction!
+    RID r_new;
+    std::string new_data(800, 'N');
+    EXPECT_TRUE(page.InsertTuple(Tuple(new_data), &r_new));
+
+    // r_new should reuse slot 1 (since r1 was defragmented/cleared)
+    EXPECT_EQ(r_new.GetSlotNum(), 1);
+    EXPECT_EQ(page.GetNumTuples(), 4);
+
+    // All active tuples (0, new, 2, 3) must be intact and verified
+    Tuple t0, t_new, t2, t3;
+    EXPECT_TRUE(page.GetTuple(r0, &t0));
+    EXPECT_EQ(t0.AsStringView(), std::string(950, '0'));
+
+    EXPECT_TRUE(page.GetTuple(r_new, &t_new));
+    EXPECT_EQ(t_new.AsStringView(), new_data);
+
+    EXPECT_TRUE(page.GetTuple(r2, &t2));
+    EXPECT_EQ(t2.AsStringView(), std::string(950, '2'));
+
+    EXPECT_TRUE(page.GetTuple(r3, &t3));
+    EXPECT_EQ(t3.AsStringView(), std::string(950, '3'));
+}
+
+TEST_F(TablePageTest, InsertTupleCompactionOnApplyDelete) {
+    TablePage page;
+    page.Init(1);
+
+    // Fill page with 4 tuples of 900 bytes
+    RID r0, r1, r2, r3;
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(900, 'A')), &r0));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(900, 'B')), &r1));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(900, 'C')), &r2));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(900, 'D')), &r3));
+
+    // Apply delete on r1 and trailing r3
+    EXPECT_TRUE(page.ApplyDelete(r1));
+    EXPECT_TRUE(page.ApplyDelete(r3));
+
+    // Contiguous free space is still small before compaction
+    uint32_t contig_before = page.GetFreeSpaceRemaining();
+    EXPECT_LT(contig_before, 500);
+
+    // Insert 1200-byte tuple which requires compaction to succeed
+    RID r_large;
+    std::string large_payload(1200, 'L');
+    EXPECT_TRUE(page.InsertTuple(Tuple(large_payload), &r_large));
+
+    // Verify data integrity
+    Tuple t0, t2, t_large;
+    EXPECT_TRUE(page.GetTuple(r0, &t0));
+    EXPECT_EQ(t0.AsStringView(), std::string(900, 'A'));
+
+    EXPECT_TRUE(page.GetTuple(r2, &t2));
+    EXPECT_EQ(t2.AsStringView(), std::string(900, 'C'));
+
+    EXPECT_TRUE(page.GetTuple(r_large, &t_large));
+    EXPECT_EQ(t_large.AsStringView(), large_payload);
+}
+
+TEST_F(TablePageTest, UpdateTupleCompaction) {
+    TablePage page;
+    page.Init(1);
+
+    // Insert 3 tuples
+    RID r0, r1, r2;
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(1000, '0')), &r0));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(1000, '1')), &r1));
+    EXPECT_TRUE(page.InsertTuple(Tuple(std::string(1000, '2')), &r2));
+
+    // Mark delete r1 (1000 bytes dead)
+    EXPECT_TRUE(page.MarkDelete(r1));
+
+    // Update r0 to grow from 1000 to 1800 bytes
+    // Contiguous space is ~1048 bytes, not enough for 1800.
+    // But compaction reclaims r1 (1000) and r0's old space (1000), giving plenty of room!
+    std::string grown_data(1800, 'G');
+    Tuple old_tuple;
+    EXPECT_TRUE(page.UpdateTuple(Tuple(grown_data), &old_tuple, r0));
+    EXPECT_EQ(old_tuple.AsStringView(), std::string(1000, '0'));
+
+    // Verify r0 now has grown data and r2 is intact
+    Tuple t0, t2;
+    EXPECT_TRUE(page.GetTuple(r0, &t0));
+    EXPECT_EQ(t0.AsStringView(), grown_data);
+
+    EXPECT_TRUE(page.GetTuple(r2, &t2));
+    EXPECT_EQ(t2.AsStringView(), std::string(1000, '2'));
+}
+
+TEST_F(TablePageTest, MarkDeleteValidation) {
+    TablePage page;
+    page.Init(10);
+
+    RID r0;
+    EXPECT_TRUE(page.InsertTuple(Tuple("Valid Tuple"), &r0));
+
+    // Wrong page ID
+    EXPECT_FALSE(page.MarkDelete(RID(999, 0)));
+
+    // Out of bounds slot
+    EXPECT_FALSE(page.MarkDelete(RID(10, 5)));
+
+    // Valid delete
+    EXPECT_TRUE(page.MarkDelete(r0));
+
+    // Already deleted
+    EXPECT_FALSE(page.MarkDelete(r0));
+}
+
+TEST_F(TablePageTest, MultipleCompactionCycles) {
+    TablePage page;
+    page.Init(1);
+
+    // Repeated cycles of insert, delete, and compacting insert
+    for (int cycle = 0; cycle < 5; ++cycle) {
+        RID rA, rB;
+        EXPECT_TRUE(page.InsertTuple(Tuple(std::string(1200, 'A' + cycle)), &rA));
+        EXPECT_TRUE(page.InsertTuple(Tuple(std::string(1200, 'B' + cycle)), &rB));
+
+        EXPECT_TRUE(page.MarkDelete(rA));
+
+        // Insert new tuple that forces compaction to reclaim rA
+        RID rC;
+        EXPECT_TRUE(page.InsertTuple(Tuple(std::string(1200, 'C' + cycle)), &rC));
+
+        Tuple tB, tC;
+        EXPECT_TRUE(page.GetTuple(rB, &tB));
+        EXPECT_EQ(tB.AsStringView(), std::string(1200, 'B' + cycle));
+
+        EXPECT_TRUE(page.GetTuple(rC, &tC));
+        EXPECT_EQ(tC.AsStringView(), std::string(1200, 'C' + cycle));
+
+        // Clean up for next cycle
+        EXPECT_TRUE(page.MarkDelete(rB));
+        EXPECT_TRUE(page.MarkDelete(rC));
+    }
+}
+
