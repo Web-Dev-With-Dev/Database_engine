@@ -33,11 +33,17 @@ echo "=========================================================="
 echo " Running BufferPoolManager Concurrent Tests under Helgrind"
 echo "=========================================================="
 
+SUPP_OPT=""
+if [ -f "${ROOT_DIR}/helgrind.supp" ]; then
+    SUPP_OPT="--suppressions=${ROOT_DIR}/helgrind.supp"
+fi
+
 valgrind \
   --tool=helgrind \
   --error-exitcode=1 \
   --read-var-info=yes \
   --track-lockorders=yes \
+  ${SUPP_OPT} \
   "${BUILD_DIR}/buffer_pool_manager_concurrent_test"
 
 echo ""

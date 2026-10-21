@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <set>
 #include <string>
@@ -17,6 +19,50 @@
 #include "page.h"
 
 namespace fs = std::filesystem;
+
+namespace {
+
+// Thread synchronization gate using POSIX-compatible std::mutex and std::condition_variable.
+// Fully recognized by both ThreadSanitizer and Valgrind Helgrind without false positives.
+class StartGate {
+public:
+    void Wait() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait(lock, [this] { return opened_; });
+    }
+
+    void Open() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            opened_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    bool opened_{false};
+};
+
+class StopSignal {
+public:
+    bool ShouldStop() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return stop_;
+    }
+
+    void SetStop() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        stop_ = true;
+    }
+
+private:
+    std::mutex mtx_;
+    bool stop_{false};
+};
+
+}  // namespace
 
 class BufferPoolManagerConcurrentTest : public ::testing::Test {
 protected:
@@ -61,48 +107,52 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentFetchUnpinSinglePage) {
 
     const int num_threads = 8;
     const int ops_per_thread = 500;
-    std::atomic<bool> start_flag{false};
-    std::atomic<int> successful_fetches{0};
+    StartGate gate;
+    std::vector<int> successful_fetches(num_threads, 0);
 
-    auto worker = [&]() {
-        while (!start_flag.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
+    auto worker = [&](int thread_id) {
+        gate.Wait();
 
+        int local_success = 0;
         for (int i = 0; i < ops_per_thread; ++i) {
             Page *page = bpm.FetchPage(target_page_id);
-            ASSERT_NE(page, nullptr);
-            successful_fetches.fetch_add(1, std::memory_order_relaxed);
+            if (page != nullptr) {
+                ++local_success;
 
-            // Read verification under RLatch
-            page->RLatch();
-            EXPECT_STREQ(page->GetData(), "concurrent_single_page_test");
-            page->RUnlatch();
+                // Read verification under RLatch
+                page->RLatch();
+                EXPECT_STREQ(page->GetData(), "concurrent_single_page_test");
+                page->RUnlatch();
 
-            // Interleave with small yield
-            if (i % 10 == 0) {
-                std::this_thread::yield();
+                if (i % 10 == 0) {
+                    std::this_thread::yield();
+                }
+
+                bool unpinned = bpm.UnpinPage(target_page_id, false);
+                EXPECT_TRUE(unpinned);
             }
-
-            bool unpinned = bpm.UnpinPage(target_page_id, false);
-            EXPECT_TRUE(unpinned);
         }
+        successful_fetches[thread_id] = local_success;
     };
 
     std::vector<std::thread> threads;
     threads.reserve(num_threads);
     for (int i = 0; i < num_threads; ++i) {
-        threads.emplace_back(worker);
+        threads.emplace_back(worker, i);
     }
 
     // Release all threads simultaneously
-    start_flag.store(true, std::memory_order_release);
+    gate.Open();
 
     for (auto &t : threads) {
         t.join();
     }
 
-    EXPECT_EQ(successful_fetches.load(), num_threads * ops_per_thread);
+    int total_fetches = 0;
+    for (int count : successful_fetches) {
+        total_fetches += count;
+    }
+    EXPECT_EQ(total_fetches, num_threads * ops_per_thread);
 
     // Pin count must converge exactly back to 0
     Page *page = bpm.FetchPage(target_page_id);
@@ -144,25 +194,22 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentRandomFetchUnpinWithEviction) 
 
     const int num_threads = 10;
     const int ops_per_thread = 200;
-    std::atomic<bool> start_flag{false};
-    std::atomic<int> completed_ops{0};
-    std::atomic<int> pool_full_retries{0};
+    StartGate gate;
+    std::vector<int> completed_ops(num_threads, 0);
 
     auto worker = [&](int thread_id) {
         std::mt19937_64 rng(1337 + thread_id);
         std::uniform_int_distribution<size_t> dist(0, num_pages - 1);
 
-        while (!start_flag.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
+        gate.Wait();
 
+        int local_ops = 0;
         for (int i = 0; i < ops_per_thread; ++i) {
             page_id_t target_pid = page_ids[dist(rng)];
             Page *page = bpm.FetchPage(target_pid);
 
             if (page == nullptr) {
                 // All 5 frames pinned by other threads momentarily; retry
-                pool_full_retries.fetch_add(1, std::memory_order_relaxed);
                 std::this_thread::yield();
                 --i;
                 continue;
@@ -179,8 +226,9 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentRandomFetchUnpinWithEviction) 
             bool unpinned = bpm.UnpinPage(target_pid, false);
             EXPECT_TRUE(unpinned);
 
-            completed_ops.fetch_add(1, std::memory_order_relaxed);
+            ++local_ops;
         }
+        completed_ops[thread_id] = local_ops;
     };
 
     std::vector<std::thread> threads;
@@ -189,13 +237,17 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentRandomFetchUnpinWithEviction) 
         threads.emplace_back(worker, i);
     }
 
-    start_flag.store(true, std::memory_order_release);
+    gate.Open();
 
     for (auto &t : threads) {
         t.join();
     }
 
-    EXPECT_EQ(completed_ops.load(), num_threads * ops_per_thread);
+    int total_completed = 0;
+    for (int count : completed_ops) {
+        total_completed += count;
+    }
+    EXPECT_EQ(total_completed, num_threads * ops_per_thread);
 
     // Confirm all pages can still be fetched and data is intact
     for (page_id_t pid : page_ids) {
@@ -233,13 +285,10 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentReadWriteLatchingStress) {
     const int num_writers = 4;
     const int ops_per_thread = 400;
 
-    std::atomic<bool> start_flag{false};
-    std::atomic<int> writer_seq{1};
+    StartGate gate;
 
     auto reader_worker = [&]() {
-        while (!start_flag.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
+        gate.Wait();
 
         for (int i = 0; i < ops_per_thread; ++i) {
             Page *page = bpm.FetchPage(shared_pid);
@@ -260,16 +309,14 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentReadWriteLatchingStress) {
         }
     };
 
-    auto writer_worker = [&]() {
-        while (!start_flag.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
+    auto writer_worker = [&](int writer_id) {
+        gate.Wait();
 
         for (int i = 0; i < ops_per_thread; ++i) {
             Page *page = bpm.FetchPage(shared_pid);
             ASSERT_NE(page, nullptr);
 
-            int val = writer_seq.fetch_add(1, std::memory_order_relaxed);
+            int val = (writer_id + 1) * 10000 + i;
 
             page->WLatch();
             int buffer[ARRAY_SIZE];
@@ -287,9 +334,9 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentReadWriteLatchingStress) {
     writers.reserve(num_writers);
 
     for (int i = 0; i < num_readers; ++i) readers.emplace_back(reader_worker);
-    for (int i = 0; i < num_writers; ++i) writers.emplace_back(writer_worker);
+    for (int i = 0; i < num_writers; ++i) writers.emplace_back(writer_worker, i);
 
-    start_flag.store(true, std::memory_order_release);
+    gate.Open();
 
     for (auto &t : readers) t.join();
     for (auto &t : writers) t.join();
@@ -327,12 +374,10 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentNewPageAllocation) {
     };
 
     std::vector<std::vector<PageRecord>> thread_records(num_threads);
-    std::atomic<bool> start_flag{false};
+    StartGate gate;
 
     auto worker = [&](int thread_id) {
-        while (!start_flag.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
+        gate.Wait();
 
         for (int i = 0; i < pages_per_thread; ++i) {
             page_id_t pid = INVALID_PAGE_ID;
@@ -363,7 +408,7 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentNewPageAllocation) {
         threads.emplace_back(worker, i);
     }
 
-    start_flag.store(true, std::memory_order_release);
+    gate.Open();
 
     for (auto &t : threads) {
         t.join();
@@ -422,7 +467,9 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentPinExhaustionAndRecovery) {
     EXPECT_EQ(fail_page, nullptr);
     EXPECT_EQ(fail_pid, INVALID_PAGE_ID);
 
-    std::atomic<bool> worker_succeeded{false};
+    std::promise<bool> promise;
+    auto future = promise.get_future();
+
     std::thread waiter([&]() {
         // Spin until a frame becomes available
         Page *recovered_page = nullptr;
@@ -436,8 +483,10 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentPinExhaustionAndRecovery) {
         }
 
         if (recovered_page != nullptr) {
-            worker_succeeded.store(true);
             bpm.UnpinPage(new_pid, false);
+            promise.set_value(true);
+        } else {
+            promise.set_value(false);
         }
     });
 
@@ -445,8 +494,9 @@ TEST_F(BufferPoolManagerConcurrentTest, ConcurrentPinExhaustionAndRecovery) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     EXPECT_TRUE(bpm.UnpinPage(pinned_pages[0], false));
 
+    bool waiter_ok = future.get();
     waiter.join();
-    EXPECT_TRUE(worker_succeeded.load());
+    EXPECT_TRUE(waiter_ok);
 
     // Clean up remaining pinned pages
     for (size_t i = 1; i < pool_size; ++i) {
@@ -474,15 +524,17 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
         initial_pids.push_back(pid);
     }
 
-    std::atomic<bool> stop_flag{false};
-    std::atomic<int> ops_count{0};
+    StopSignal stop_signal;
+    const size_t total_workers = 9;
+    std::vector<int> worker_ops(total_workers, 0);
 
-    // Reader workers
+    // Reader workers (4 threads: 0-3)
     auto reader_task = [&](int id) {
         std::mt19937 rng(42 + id);
         std::uniform_int_distribution<size_t> dist(0, initial_pids.size() - 1);
 
-        while (!stop_flag.load(std::memory_order_relaxed)) {
+        int ops = 0;
+        while (!stop_signal.ShouldStop()) {
             page_id_t pid = initial_pids[dist(rng)];
             Page *page = bpm.FetchPage(pid);
             if (page != nullptr) {
@@ -492,17 +544,19 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
                 page->RUnlatch();
                 bpm.UnpinPage(pid, false);
             }
-            ops_count.fetch_add(1, std::memory_order_relaxed);
+            ++ops;
             std::this_thread::yield();
         }
+        worker_ops[id] = ops;
     };
 
-    // Writer workers
+    // Writer workers (4 threads: 4-7)
     auto writer_task = [&](int id) {
         std::mt19937 rng(100 + id);
         std::uniform_int_distribution<size_t> dist(0, initial_pids.size() - 1);
 
-        while (!stop_flag.load(std::memory_order_relaxed)) {
+        int ops = 0;
+        while (!stop_signal.ShouldStop()) {
             page_id_t pid = initial_pids[dist(rng)];
             Page *page = bpm.FetchPage(pid);
             if (page != nullptr) {
@@ -511,33 +565,42 @@ TEST_F(BufferPoolManagerConcurrentTest, MixedConcurrentLifecycleStress) {
                 page->WUnlatch();
                 bpm.UnpinPage(pid, true);
             }
-            ops_count.fetch_add(1, std::memory_order_relaxed);
+            ++ops;
             std::this_thread::yield();
         }
+        worker_ops[4 + id] = ops;
     };
 
-    // Flusher worker
+    // Flusher worker (thread 8)
     auto flusher_task = [&]() {
-        while (!stop_flag.load(std::memory_order_relaxed)) {
+        int ops = 0;
+        while (!stop_signal.ShouldStop()) {
             bpm.FlushAllPages();
+            ++ops;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        worker_ops[8] = ops;
     };
 
     std::vector<std::thread> workers;
+    workers.reserve(total_workers);
     for (int i = 0; i < 4; ++i) workers.emplace_back(reader_task, i);
     for (int i = 0; i < 4; ++i) workers.emplace_back(writer_task, i);
     workers.emplace_back(flusher_task);
 
     // Let them run for 300ms of intensive stress
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    stop_flag.store(true, std::memory_order_relaxed);
+    stop_signal.SetStop();
 
     for (auto &w : workers) {
         w.join();
     }
 
-    EXPECT_GT(ops_count.load(), 500);
+    int total_ops = 0;
+    for (int ops : worker_ops) {
+        total_ops += ops;
+    }
+    EXPECT_GT(total_ops, 500);
 
     // After storm, FlushAllPages must run cleanly and all frames should be intact
     EXPECT_NO_THROW(bpm.FlushAllPages());

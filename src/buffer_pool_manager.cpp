@@ -232,8 +232,15 @@ bool BufferPoolManager::FlushPage(page_id_t page_id) {
     Page &page = pages_[frame_id];
 
     if (page.IsDirty()) {
-        disk_manager_->WritePage(page_id, page.GetData());
-        page.SetDirty(false);
+        page.RLatch();
+        try {
+            disk_manager_->WritePage(page_id, page.GetData());
+            page.SetDirty(false);
+            page.RUnlatch();
+        } catch (...) {
+            page.RUnlatch();
+            throw;
+        }
     }
 
     return true;
@@ -245,8 +252,15 @@ void BufferPoolManager::FlushAllPages() {
     for (const auto &[page_id, frame_id] : page_table_) {
         Page &page = pages_[frame_id];
         if (page.IsDirty()) {
-            disk_manager_->WritePage(page_id, page.GetData());
-            page.SetDirty(false);
+            page.RLatch();
+            try {
+                disk_manager_->WritePage(page_id, page.GetData());
+                page.SetDirty(false);
+                page.RUnlatch();
+            } catch (...) {
+                page.RUnlatch();
+                throw;
+            }
         }
     }
 }

@@ -1,0 +1,25 @@
+# Helgrind suppressions for GoogleTest and standard library runtime internals
+{
+   gtest_internal_race
+   Helgrind:Race
+   ...
+   fun:*testing*internal*
+}
+{
+   gtest_internal_lockorder
+   Helgrind:LockOrder
+   ...
+   fun:*testing*internal*
+}
+{
+   gtest_testsuite_run
+   Helgrind:Race
+   ...
+   fun:*testing*TestSuite*Run*
+}
+{
+   gtest_unittest_run
+   Helgrind:Race
+   ...
+   fun:*testing*UnitTest*Run*
+}
