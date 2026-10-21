@@ -1,8 +1,20 @@
-# Database Engine
+<p align="center">
+  <img src="assets/dittodb_icon.png" alt="DittoDB Logo" width="180" />
+</p>
 
-A disk-oriented relational database storage engine built from scratch in C++20, implementing the fundamental layers that underpin industrial database management systems like PostgreSQL, SQLite, and MySQL — persistent disk I/O, in-memory buffer pool management with scan-resistant LRU-K eviction, slotted-page storage with dual-ended growth, compaction with RID stability, and multi-page table heaps with cross-page update migration.
+<h1 align="center">DittoDB</h1>
 
-> **Goal**: Build a complete, production-grade database storage engine from the ground up, layer by layer, with zero shortcuts.
+<p align="center">
+  <strong>The malleable, high-performance C++20 relational database storage engine.</strong><br>
+  <em>Adaptive page layouts • Scan-resistant LRU-K caching • Multi-page table heaps • Zero shortcuts.</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
+  <img src="https://img.shields.io/badge/Tests-171%2F171%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Architecture-5--Tier-purple.svg" alt="Architecture" />
+  <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
+</p>
 
 ---
 
@@ -222,8 +234,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Or run individual component test executables:
+Run the interactive demo or individual component test suites:
 ```bash
+./build/dittodb.exe                   # DittoDB demo CLI
 ./build/disk_manager_test.exe         # Disk I/O & corruption detection
 ./build/page_test.exe                 # Page frames & latch concurrency
 ./build/lru_k_replacer_test.exe       # LRU-K replacement policy

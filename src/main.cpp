@@ -3,39 +3,41 @@
 #include <iostream>
 #include <stdexcept>
 
-int main(int argc, char* argv[]) {
-    // Optional: pass a database file path as first argument.
-    // Defaults to the Data/ directory relative to the project root.
-    const char* db_path = (argc > 1) ? argv[1] : "../Data/database.db";
+int main(int argc, char *argv[]) {
+  // Optional: pass a database file path as first argument.
+  const char *db_path = (argc > 1) ? argv[1] : "dittodb.db";
 
-    std::cout << "Database Engine Demo\n";
-    std::cout << "Opening: " << db_path << "\n\n";
+  std::cout << "========================================\n";
+  std::cout << "          DittoDB Storage Engine        \n";
+  std::cout << "  Adaptive Page Layouts • C++20 Storage \n";
+  std::cout << "========================================\n\n";
+  std::cout << "Opening: " << db_path << "\n\n";
 
-    try {
-        DiskManager disk(db_path);
+  try {
+    DiskManager disk(db_path);
 
-        // Allocate and write a page
-        page_id_t id = disk.AllocatePage();
-        std::cout << "Allocated page id: " << id << "\n";
+    // Allocate and write a page
+    page_id_t id = disk.AllocatePage();
+    std::cout << "Allocated page id: " << id << "\n";
 
-        char page[PAGE_SIZE];
-        memset(page, 0, PAGE_SIZE);
-        strcpy(page, "Hello Database!");
+    char page[PAGE_SIZE];
+    memset(page, 0, PAGE_SIZE);
+    strcpy(page, "Hello Database!");
 
-        disk.WritePage(id, page);
-        std::cout << "Written to page " << id << ": \"" << page << "\"\n";
+    disk.WritePage(id, page);
+    std::cout << "Written to page " << id << ": \"" << page << "\"\n";
 
-        // Read it back
-        char buf[PAGE_SIZE];
-        disk.ReadPage(id, buf);
-        std::cout << "Read from page  " << id << ": \"" << buf << "\"\n";
+    // Read it back
+    char buf[PAGE_SIZE];
+    disk.ReadPage(id, buf);
+    std::cout << "Read from page  " << id << ": \"" << buf << "\"\n";
 
-        std::cout << "\nNext free page id: " << disk.GetNextPageId() << "\n";
+    std::cout << "\nNext free page id: " << disk.GetNextPageId() << "\n";
 
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
-        return 1;
-    }
+  } catch (const std::exception &e) {
+    std::cerr << "Error: " << e.what() << "\n";
+    return 1;
+  }
 
-    return 0;
+  return 0;
 }
