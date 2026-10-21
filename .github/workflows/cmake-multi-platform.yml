@@ -1,0 +1,79 @@
+name: CMake on multiple platforms
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-linux:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC (C++20)
+            c_compiler: gcc-13
+            cpp_compiler: g++-13
+          - name: Linux Clang (C++20)
+            c_compiler: clang-17
+            cpp_compiler: clang++-17
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtest-dev ${{ matrix.c_compiler }} ${{ matrix.cpp_compiler }}
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+
+      - name: Build All Targets
+        run: cmake --build build --config Release
+
+      - name: Run Test Suite (171 Tests)
+        run: ctest --test-dir build --output-on-failure --verbose
+
+  build-windows:
+    name: Windows MSYS2 UCRT64 (C++20)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-gtest
+
+      - name: Configure CMake
+        shell: msys2 {0}
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++
+
+      - name: Build All Targets
+        shell: msys2 {0}
+        run: cmake --build build --config Release
+
+      - name: Run Test Suite (171 Tests)
+        shell: msys2 {0}
+        run: ctest --test-dir build --output-on-failure
