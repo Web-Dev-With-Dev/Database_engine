@@ -195,6 +195,9 @@ database-engine/
 │   ├── buffer_pool_manager.cpp  # BufferPoolManager implementation
 │   ├── table_page.cpp           # TablePage & TablePageIterator implementation
 │   └── table_heap.cpp           # TableHeap & TableIterator implementation
+├── scripts/
+│   ├── run_tsan.sh              # Build and run under ThreadSanitizer
+│   └── run_helgrind.sh          # Build and run under Valgrind Helgrind
 ├── tests/
 │   ├── disk_manager_test.cpp        # 42 DiskManager tests + benchmarks
 │   ├── page_test.cpp                # 28 Page latching & pin tests
@@ -203,7 +206,10 @@ database-engine/
 │   ├── integration_test.cpp         # 15 BufferPool integration workload tests
 │   ├── rid_test.cpp                 # 9 RID packing, hashing, & comparison tests
 │   ├── table_page_test.cpp          # 41 Slotted page, iterator, defrag, & stability tests
-│   └── table_heap_test.cpp          # 9 Multi-page TableHeap & cross-page migration tests
+│   ├── table_heap_test.cpp          # 9 Multi-page TableHeap & cross-page migration tests
+│   ├── extendible_hash_table_test.cpp # 10 Directory & bucket split tests
+│   ├── e2e_storage_test.cpp         # 4 Multi-tier storage integration tests
+│   └── buffer_pool_manager_concurrent_test.cpp # 6 Multithreaded stress & latching tests
 ├── docs/
 │   ├── disk_manager_design.md   # Disk storage architecture deep-dive
 │   ├── lru_k_design.md          # LRU-K cache algorithm deep-dive
@@ -235,43 +241,73 @@ cmake --build build
 ### Run All Unit & Integration Tests
 
 ```bash
-# Run full test suite via CTest (185 tests)
+# Run full test suite via CTest (191 tests)
 ctest --test-dir build --output-on-failure
 ```
 
 Run the interactive demo or individual component test suites:
 ```bash
-./build/dittodb.exe                   # DittoDB demo CLI
-./build/disk_manager_test.exe         # Disk I/O & corruption detection
-./build/page_test.exe                 # Page frames & latch concurrency
-./build/lru_k_replacer_test.exe       # LRU-K replacement policy
-./build/buffer_pool_manager_test.exe  # Buffer pool caching & evictions
-./build/integration_test.exe          # Complex database access simulations
-./build/rid_test.exe                  # RID bit-packing & hashing
-./build/table_page_test.exe           # Slotted pages, compactions, & iterators
-./build/table_heap_test.exe           # Multi-page TableHeap & migration updates
-./build/extendible_hash_table_test.exe# Extendible hash directory & bucket splits
-./build/e2e_storage_test.exe          # Multi-tier integration under forced evictions
+./build/dittodb.exe                               # DittoDB demo CLI
+./build/disk_manager_test.exe                     # Disk I/O & corruption detection
+./build/page_test.exe                             # Page frames & latch concurrency
+./build/lru_k_replacer_test.exe                   # LRU-K replacement policy
+./build/buffer_pool_manager_test.exe              # Buffer pool caching & evictions
+./build/integration_test.exe                      # Complex database access simulations
+./build/rid_test.exe                              # RID bit-packing & hashing
+./build/table_page_test.exe                       # Slotted pages, compactions, & iterators
+./build/table_heap_test.exe                       # Multi-page TableHeap & migration updates
+./build/extendible_hash_table_test.exe            # Extendible hash directory & bucket splits
+./build/e2e_storage_test.exe                      # Multi-tier integration under forced evictions
+./build/buffer_pool_manager_concurrent_test.exe   # Multithreaded stress & latching under eviction
+```
+
+---
+
+## ThreadSanitizer & Helgrind Verification
+
+DittoDB is designed and verified for zero data races and deadlocks under heavy concurrent access:
+
+### 1. ThreadSanitizer (TSan)
+ThreadSanitizer monitors memory accesses at compile/runtime to catch race conditions and lock order inversions.
+```bash
+# Using the helper script (Linux / macOS / WSL)
+./scripts/run_tsan.sh
+
+# Or configure manually with CMake
+cmake -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
+cmake --build build-tsan
+ctest --test-dir build-tsan --output-on-failure
+```
+
+### 2. Valgrind Helgrind
+Helgrind performs dynamic POSIX pthread synchronization and lock hierarchy analysis:
+```bash
+# Using the helper script
+./scripts/run_helgrind.sh
+
+# Or run manually
+valgrind --tool=helgrind --error-exitcode=1 ./build/buffer_pool_manager_concurrent_test
 ```
 
 ---
 
 ## Test Coverage Summary
 
-**Current Status: 185 / 185 tests passing (100% pass rate).**
+**Current Status: 191 / 191 tests passing across 11 suites (100% pass rate).**
 
 | Test Suite | Tests | Features Covered |
 |---|---|---|
 | `DiskManagerTest` | 42 | Page-addressed read/write, zero-fill sparse allocation, persistence, corruption validation, concurrent stress |
 | `PageTest` | 28 | Frame data integrity, pin/unpin saturating counters, dirty flags, shared/exclusive latches, stress tests |
 | `LRUKReplacerTest` | 14 | Cold/hot queue transitions, $K$-distance eviction order ($K=2, 3$), pin overrides, empty queues, 100k-op benchmark |
-| `BufferPoolManagerTest` | 13 | Page table hits/misses, frame allocation, dirty-page writeback, eviction correctness, concurrent thread safety |
+| `BufferPoolManagerTest` | 13 | Page table hits/misses, frame allocation, dirty-page writeback, eviction correctness, thread safety |
 | `BufferPoolIntegrationTest` | 15 | Mixed database workloads, repeated access patterns, sequential scans, frame-to-page mappings |
 | `RIDTest` | 9 | 64-bit int packing, equality, ordering, stream formatting, `std::hash` in `std::unordered_map` |
 | `TablePageTest` | 41 | Dual-end growth, variable-length inserts, in-place updates, tombstones, defragmentation, `TablePageIterator`, insert-until-full, delete + reinsert, RID stability |
 | `TableHeapTest` | 9 | Linked-page creation, multi-page spanning inserts, cross-page migration update (Delete Old + Insert New), `TableIterator` across pages, crash-restart persistence |
 | `ExtendibleHashTableTest` | 10 | Directory page doubling/shrinking, split images, hash masking, bucket splits, key redistribution, persistence across buffer pool eviction |
 | `EndToEndStorageIntegrationTest` | 4 | Real DiskManager + LRUK + BPM + TablePage + TableHeap cooperating across 50+ pages with only 4-5 frames, forced dirty-evictions, random updates, crash persistence |
+| `BufferPoolManagerConcurrentTest` | 6 | Concurrent `FetchPage`/`UnpinPage` contention, 10-thread eviction storm, concurrent `NewPage` allocation uniqueness, reader-writer latching isolation, pin exhaustion recovery, mixed lifecycle stress |
 
 ---
 
@@ -281,3 +317,4 @@ Run the interactive demo or individual component test suites:
 - [The LRU-K Page Replacement Algorithm (O'Neil et al., 1993)](https://dl.acm.org/doi/10.1145/170036.170081) — Foundation of the replacer
 - [PostgreSQL Storage Page Layout](https://www.postgresql.org/docs/current/storage-page-layout.html) — Slotted page format & line pointers
 - [SQLite Database File Format](https://www.sqlite.org/fileformat.html) — Slotted cell pointers, freeblocks, and fragmentation
+

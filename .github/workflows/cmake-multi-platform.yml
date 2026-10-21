@@ -40,7 +40,7 @@ jobs:
       - name: Build All Targets
         run: cmake --build build --config Release
 
-      - name: Run Test Suite (171 Tests)
+      - name: Run Test Suite (191 Tests)
         run: ctest --test-dir build --output-on-failure --verbose
 
   build-windows:
@@ -74,6 +74,48 @@ jobs:
         shell: msys2 {0}
         run: cmake --build build --config Release
 
-      - name: Run Test Suite (171 Tests)
+      - name: Run Test Suite (191 Tests)
         shell: msys2 {0}
         run: ctest --test-dir build --output-on-failure
+
+  sanitizers-and-valgrind:
+    name: Linux ThreadSanitizer & Helgrind
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtest-dev libgmock-dev clang-17 valgrind
+
+      - name: Configure CMake with ThreadSanitizer (TSan)
+        run: |
+          cmake -B build-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-17 \
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -DENABLE_TSAN=ON
+
+      - name: Build Targets under TSan
+        run: cmake --build build-tsan
+
+      - name: Run All Tests under ThreadSanitizer (TSan)
+        run: ctest --test-dir build-tsan --output-on-failure --verbose
+        env:
+          TSAN_OPTIONS: "halt_on_error=1 abort_on_error=1 second_deadlock_stack=1"
+
+      - name: Configure CMake for Helgrind
+        run: |
+          cmake -B build-valgrind -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-17 \
+            -DCMAKE_CXX_COMPILER=clang++-17
+
+      - name: Build BPM Concurrent Test for Helgrind
+        run: cmake --build build-valgrind --target buffer_pool_manager_concurrent_test
+
+      - name: Run Concurrent Stress Test under Valgrind Helgrind
+        run: |
+          valgrind --tool=helgrind --error-exitcode=1 ./build-valgrind/buffer_pool_manager_concurrent_test

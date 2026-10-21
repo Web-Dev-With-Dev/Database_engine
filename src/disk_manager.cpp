@@ -85,11 +85,13 @@ DiskManager::DiskManager(const std::string &file_name)
 
 page_id_t DiskManager::AllocatePage()
 {
+    std::lock_guard<std::mutex> lock(*file_mutex_);
     return next_page_id_++;
 }
 
 page_id_t DiskManager::GetNextPageId() const
 {
+    std::lock_guard<std::mutex> lock(*file_mutex_);
     return next_page_id_;
 }
 

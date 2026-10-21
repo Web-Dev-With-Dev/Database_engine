@@ -7,6 +7,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ==================== ThreadSanitizer (TSan) ====================
+option(ENABLE_TSAN "Enable ThreadSanitizer (-fsanitize=thread)" OFF)
+
+if(ENABLE_TSAN)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        if(WIN32)
+            message(WARNING "ThreadSanitizer is not supported on Windows/MinGW. Ignoring ENABLE_TSAN.")
+        else()
+            message(STATUS "Enabling ThreadSanitizer (-fsanitize=thread)")
+            add_compile_options(-fsanitize=thread -g -O1 -fno-omit-frame-pointer)
+            add_link_options(-fsanitize=thread)
+        endif()
+    endif()
+endif()
+
 # ==================== Include Directories ====================
 include_directories(include)
 
@@ -304,6 +319,29 @@ else()
     message(WARNING "e2e_storage_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e_storage_test.cpp")
 endif()
 
+# 11. Buffer Pool Manager Concurrent Stress Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/buffer_pool_manager_concurrent_test.cpp)
+    message(STATUS "Found buffer_pool_manager_concurrent_test.cpp")
+    add_executable(buffer_pool_manager_concurrent_test
+        tests/buffer_pool_manager_concurrent_test.cpp
+    )
+    
+    target_link_libraries(buffer_pool_manager_concurrent_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(buffer_pool_manager_concurrent_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(buffer_pool_manager_concurrent_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "buffer_pool_manager_concurrent_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/buffer_pool_manager_concurrent_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -353,6 +391,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "10. Running End-to-End Storage Integration Tests..."
     COMMAND ./e2e_storage_test || echo "E2E Storage tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "11. Running Buffer Pool Manager Concurrent Stress Tests..."
+    COMMAND ./buffer_pool_manager_concurrent_test || echo "BPM Concurrent tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -367,6 +408,7 @@ add_custom_target(run_all_tests
         table_heap_test
         extendible_hash_table_test
         e2e_storage_test
+        buffer_pool_manager_concurrent_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )
