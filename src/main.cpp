@@ -10,6 +10,7 @@ int main(int argc, char *argv[]) {
   std::cout << "========================================\n";
   std::cout << "          DittoDB Storage Engine        \n";
   std::cout << "  Adaptive Page Layouts • C++20 Storage \n";
+  std::cout << "        [ Status: Creation Mode ]       \n";
   std::cout << "========================================\n\n";
   std::cout << "Opening: " << db_path << "\n\n";
 

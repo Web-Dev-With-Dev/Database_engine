@@ -11,10 +11,15 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
+  <img src="https://img.shields.io/badge/Status-In%20Creation%20Mode%20%F0%9F%9A%A7-yellow.svg" alt="Creation Mode" />
   <img src="https://img.shields.io/badge/Tests-171%2F171%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
 </p>
+
+> [!NOTE]
+> 🚧 **Status: In Creation Mode**  
+> DittoDB is actively under development. The foundational 5-tier storage engine (Disk Manager, Buffer Pool, LRU-K Replacer, Slotted `TablePage`, and Multi-Page `TableHeap` with cross-page migration) is fully implemented and verified with 171/171 passing tests. Subsequent tiers (B+Tree indexing, WAL redo/recovery, and query execution) are currently being built.
 
 ---
 
