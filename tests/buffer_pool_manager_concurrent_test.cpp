@@ -32,10 +32,8 @@ public:
     }
 
     void Open() {
-        {
-            std::lock_guard<std::mutex> lock(mtx_);
-            opened_ = true;
-        }
+        std::lock_guard<std::mutex> lock(mtx_);
+        opened_ = true;
         cv_.notify_all();
     }
 
