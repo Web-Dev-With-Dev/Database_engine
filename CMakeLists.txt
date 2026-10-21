@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
 
 # ==================== ThreadSanitizer (TSan) ====================
 option(ENABLE_TSAN "Enable ThreadSanitizer (-fsanitize=thread)" OFF)
@@ -37,6 +38,7 @@ set(COMMON_SOURCES
 )
 
 set(COMMON_HEADERS
+    include/config.h
     include/lru_k_replacer.h
     include/page.h
     include/disk_manager.h

@@ -53,29 +53,57 @@ public:
                                     static_cast<uint64_t>(slot_num_));
     }
 
+    /**
+     * @brief Convert RID to a 64-bit packed integer representation (alias for Get()).
+     * @return 64-bit scalar combining page_id and slot_num.
+     */
     constexpr int64_t ToInt64() const {
         return Get();
     }
 
     /**
      * @brief Factory method to create an RID from a 64-bit packed integer.
+     * @param rid_val 64-bit packed integer representation.
+     * @return Deserialized RID instance.
      */
     static constexpr RID FromInt64(int64_t rid_val) {
         return RID(rid_val);
     }
 
+    /**
+     * @brief Get the page ID component of this RID.
+     * @return Logical page ID.
+     */
     constexpr page_id_t GetPageId() const { return page_id_; }
+
+    /**
+     * @brief Get the slot index component of this RID.
+     * @return Slot index within the page.
+     */
     constexpr uint32_t GetSlotNum() const { return slot_num_; }
 
+    /**
+     * @brief Set both page ID and slot index.
+     * @param page_id Logical page ID.
+     * @param slot_num Slot index within the page.
+     */
     constexpr void Set(page_id_t page_id, uint32_t slot_num) {
         page_id_ = page_id;
         slot_num_ = slot_num;
     }
 
+    /**
+     * @brief Set the page ID component.
+     * @param page_id Logical page ID.
+     */
     constexpr void SetPageId(page_id_t page_id) {
         page_id_ = page_id;
     }
 
+    /**
+     * @brief Set the slot index component.
+     * @param slot_num Slot index within the page.
+     */
     constexpr void SetSlotNum(uint32_t slot_num) {
         slot_num_ = slot_num;
     }
@@ -124,6 +152,10 @@ public:
         return !(*this < other);
     }
 
+    /**
+     * @brief Format RID as human-readable string: "[page_id, slot_num]".
+     * @return Formatted string.
+     */
     std::string ToString() const {
         return "[" + std::to_string(page_id_) + ", " + std::to_string(slot_num_) + "]";
     }

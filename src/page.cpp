@@ -1,7 +1,7 @@
 #include "page.h"
 
 Page::Page()
-    : page_id_(-1),
+    : page_id_(INVALID_PAGE_ID),
       pin_count_(0),
       is_dirty_(false)
 {

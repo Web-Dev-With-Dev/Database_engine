@@ -123,13 +123,6 @@ void DiskManager::WritePage(page_id_t page_id, const char *data)
         throw std::runtime_error("Corrupted database file.");
     }
 
-    db_file_.seekp(0, std::ios::end);
-
-    if (!db_file_)
-    {
-        throw std::runtime_error("Failed to seek write pointer.");
-    }
-
     char zero_page[PAGE_SIZE] = {};
 
     while (static_cast<size_t>(file_size) < offset)

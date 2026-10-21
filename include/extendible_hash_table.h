@@ -257,6 +257,10 @@ public:
 
     // ==================== Inspection & Metrics ====================
 
+    /**
+     * @brief Get current global depth of the hash table directory.
+     * @return uint32_t Global depth.
+     */
     uint32_t GetGlobalDepth() const {
         std::shared_lock<std::shared_mutex> lock(*rwlock_);
         Page *dir_page = bpm_->FetchPage(directory_page_id_);
@@ -267,6 +271,11 @@ public:
         return gd;
     }
 
+    /**
+     * @brief Get local depth of a specific bucket entry.
+     * @param bucket_idx Directory index.
+     * @return uint32_t Local depth.
+     */
     uint32_t GetLocalDepth(uint32_t bucket_idx) const {
         std::shared_lock<std::shared_mutex> lock(*rwlock_);
         Page *dir_page = bpm_->FetchPage(directory_page_id_);
@@ -277,6 +286,11 @@ public:
         return ld;
     }
 
+    /**
+     * @brief Get physical page ID of the bucket assigned to a directory index.
+     * @param bucket_idx Directory index.
+     * @return page_id_t Bucket page ID, or INVALID_PAGE_ID if fetch fails.
+     */
     page_id_t GetBucketPageId(uint32_t bucket_idx) const {
         std::shared_lock<std::shared_mutex> lock(*rwlock_);
         Page *dir_page = bpm_->FetchPage(directory_page_id_);
@@ -287,6 +301,10 @@ public:
         return id;
     }
 
+    /**
+     * @brief Count total number of unique physical bucket pages referenced by directory.
+     * @return size_t Count of unique bucket pages.
+     */
     size_t GetNumUniqueBuckets() const {
         std::shared_lock<std::shared_mutex> lock(*rwlock_);
         Page *dir_page = bpm_->FetchPage(directory_page_id_);
@@ -301,9 +319,22 @@ public:
         return unique_pages.size();
     }
 
+    /**
+     * @brief Get physical page ID of the directory page.
+     * @return page_id_t Directory page ID.
+     */
     page_id_t GetDirectoryPageId() const { return directory_page_id_; }
+
+    /**
+     * @brief Get table diagnostic identifier name.
+     * @return const std::string& Table name.
+     */
     const std::string &GetName() const { return name_; }
 
+    /**
+     * @brief Check whether internal directory depth and bucket invariants are valid.
+     * @return true if valid, false otherwise.
+     */
     bool VerifyIntegrity() const {
         std::shared_lock<std::shared_mutex> lock(*rwlock_);
         Page *dir_page = bpm_->FetchPage(directory_page_id_);

@@ -92,15 +92,54 @@ public:
         return false;
     }
 
+    /**
+     * @brief Check whether the bucket has reached its maximum entry capacity.
+     * @return true if full, false otherwise.
+     */
     bool IsFull() const { return size_ >= max_size_; }
+
+    /**
+     * @brief Check whether the bucket contains zero entries.
+     * @return true if empty, false otherwise.
+     */
     bool IsEmpty() const { return size_ == 0; }
+
+    /**
+     * @brief Get current number of stored key-value entries.
+     * @return uint32_t Number of entries.
+     */
     uint32_t Size() const { return size_; }
+
+    /**
+     * @brief Get maximum number of entries this bucket can hold.
+     * @return uint32_t Maximum entry capacity.
+     */
     uint32_t MaxSize() const { return max_size_; }
 
+    /**
+     * @brief Get const reference to the key at index idx.
+     * @param idx Entry index.
+     * @return Const reference to key.
+     */
     const KeyType &KeyAt(uint32_t idx) const { return entries_[idx].first; }
+
+    /**
+     * @brief Get const reference to the value at index idx.
+     * @param idx Entry index.
+     * @return Const reference to value.
+     */
     const ValueType &ValueAt(uint32_t idx) const { return entries_[idx].second; }
+
+    /**
+     * @brief Get const reference to the key-value pair at index idx.
+     * @param idx Entry index.
+     * @return Const reference to pair.
+     */
     const std::pair<KeyType, ValueType> &EntryAt(uint32_t idx) const { return entries_[idx]; }
 
+    /**
+     * @brief Clear all entries in the bucket and destroy stored objects.
+     */
     void Clear() {
         for (uint32_t i = 0; i < size_; ++i) {
             entries_[i].~pair();
@@ -108,8 +147,18 @@ public:
         size_ = 0;
     }
 
+    /**
+     * @brief Get the physical page ID of this bucket.
+     * @return page_id_t Bucket page ID.
+     */
     page_id_t GetPageId() const { return page_id_; }
+
+    /**
+     * @brief Set the physical page ID of this bucket.
+     * @param page_id Bucket page ID.
+     */
     void SetPageId(page_id_t page_id) { page_id_ = page_id; }
+
 
 private:
     page_id_t page_id_{INVALID_PAGE_ID};

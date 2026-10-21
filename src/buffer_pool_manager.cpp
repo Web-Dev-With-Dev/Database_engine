@@ -265,17 +265,17 @@ void BufferPoolManager::FlushAllPages() {
     }
 }
 
-size_t BufferPoolManager::GetFreeListSize() {
+size_t BufferPoolManager::GetFreeListSize() const {
     std::lock_guard<std::mutex> lock(latch_);
     return free_list_.size();
 }
 
-bool BufferPoolManager::IsPageInPool(page_id_t page_id) {
+bool BufferPoolManager::IsPageInPool(page_id_t page_id) const {
     std::lock_guard<std::mutex> lock(latch_);
     return page_table_.find(page_id) != page_table_.end();
 }
 
-frame_id_t BufferPoolManager::GetFrameId(page_id_t page_id) {
+frame_id_t BufferPoolManager::GetFrameId(page_id_t page_id) const {
     std::lock_guard<std::mutex> lock(latch_);
     auto it = page_table_.find(page_id);
     if (it != page_table_.end()) {
@@ -290,3 +290,11 @@ Page *BufferPoolManager::GetPage(frame_id_t frame_id) {
     }
     return nullptr;
 }
+
+const Page *BufferPoolManager::GetPage(frame_id_t frame_id) const {
+    if (frame_id < pool_size_) {
+        return &pages_[frame_id];
+    }
+    return nullptr;
+}
+
