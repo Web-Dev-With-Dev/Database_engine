@@ -18,6 +18,7 @@ set(COMMON_SOURCES
     src/buffer_pool_manager.cpp
     src/table_page.cpp
     src/table_heap.cpp
+    src/extendible_htable_directory_page.cpp
 )
 
 set(COMMON_HEADERS
@@ -29,6 +30,9 @@ set(COMMON_HEADERS
     include/tuple.h
     include/table_page.h
     include/table_heap.h
+    include/extendible_htable_directory_page.h
+    include/extendible_htable_bucket_page.h
+    include/extendible_hash_table.h
 )
 
 # ==================== Main Executable ====================
@@ -254,6 +258,29 @@ else()
     message(WARNING "table_heap_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/table_heap_test.cpp")
 endif()
 
+# 9. Extendible Hash Table Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/extendible_hash_table_test.cpp)
+    message(STATUS "Found extendible_hash_table_test.cpp")
+    add_executable(extendible_hash_table_test
+        tests/extendible_hash_table_test.cpp
+    )
+    
+    target_link_libraries(extendible_hash_table_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(extendible_hash_table_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(extendible_hash_table_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "extendible_hash_table_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/extendible_hash_table_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -297,6 +324,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "8. Running Table Heap Tests..."
     COMMAND ./table_heap_test || echo "Table Heap tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "9. Running Extendible Hash Table Tests..."
+    COMMAND ./extendible_hash_table_test || echo "Extendible Hash Table tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -309,6 +339,7 @@ add_custom_target(run_all_tests
         table_page_test
         rid_test
         table_heap_test
+        extendible_hash_table_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )

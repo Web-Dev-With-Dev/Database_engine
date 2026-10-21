@@ -12,14 +12,14 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Language-C%2B%2B20-blue.svg" alt="C++20" />
   <img src="https://img.shields.io/badge/Status-In%20Creation%20Mode%20%F0%9F%9A%A7-yellow.svg" alt="Creation Mode" />
-  <img src="https://img.shields.io/badge/Tests-171%2F171%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-181%2F181%20Passed-brightgreen.svg" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-5--Tier-purple.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-orange.svg" alt="Build" />
 </p>
 
 > [!NOTE]
 > 🚧 **Status: In Creation Mode**  
-> DittoDB is actively under development. The foundational 5-tier storage engine (Disk Manager, Buffer Pool, LRU-K Replacer, Slotted `TablePage`, and Multi-Page `TableHeap` with cross-page migration) is fully implemented and verified with 171/171 passing tests. Subsequent tiers (B+Tree indexing, WAL redo/recovery, and query execution) are currently being built.
+> DittoDB is actively under development. Core storage layers (Disk Manager, Buffer Pool, LRU-K Replacer, Slotted `TablePage`, Multi-Page `TableHeap`, and buffer-pool-backed `ExtendibleHashTable`) are fully implemented and verified with 181/181 passing tests. Subsequent tiers (B+Tree indexing, WAL redo/recovery, and query execution) are currently being built.
 
 ---
 
@@ -235,7 +235,7 @@ cmake --build build
 ### Run All Unit & Integration Tests
 
 ```bash
-# Run full test suite via CTest (171 tests)
+# Run full test suite via CTest (181 tests)
 ctest --test-dir build --output-on-failure
 ```
 
@@ -250,13 +250,14 @@ Run the interactive demo or individual component test suites:
 ./build/rid_test.exe                  # RID bit-packing & hashing
 ./build/table_page_test.exe           # Slotted pages, compactions, & iterators
 ./build/table_heap_test.exe           # Multi-page TableHeap & migration updates
+./build/extendible_hash_table_test.exe# Extendible hash directory & bucket splits
 ```
 
 ---
 
 ## Test Coverage Summary
 
-**Current Status: 171 / 171 tests passing (100% pass rate).**
+**Current Status: 181 / 181 tests passing (100% pass rate).**
 
 | Test Suite | Tests | Features Covered |
 |---|---|---|
@@ -268,6 +269,7 @@ Run the interactive demo or individual component test suites:
 | `RIDTest` | 9 | 64-bit int packing, equality, ordering, stream formatting, `std::hash` in `std::unordered_map` |
 | `TablePageTest` | 41 | Dual-end growth, variable-length inserts, in-place updates, tombstones, defragmentation, `TablePageIterator`, insert-until-full, delete + reinsert, RID stability |
 | `TableHeapTest` | 9 | Linked-page creation, multi-page spanning inserts, cross-page migration update (Delete Old + Insert New), `TableIterator` across pages, crash-restart persistence |
+| `ExtendibleHashTableTest` | 10 | Directory page doubling/shrinking, split images, hash masking, bucket splits, key redistribution, persistence across buffer pool eviction |
 
 ---
 

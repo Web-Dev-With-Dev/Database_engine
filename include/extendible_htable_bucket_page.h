@@ -1,0 +1,123 @@
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+#include <utility>
+#include <vector>
+#include "config.h"
+
+/**
+ * @brief Bucket page for Extendible Hash Table.
+ *
+ * Stored inside a 4096-byte Page in BufferPoolManager.
+ * Stores key-value entries up to BUCKET_ARRAY_SIZE.
+ */
+template <typename KeyType, typename ValueType>
+class ExtendibleHTableBucketPage {
+public:
+    static constexpr size_t BUCKET_HEADER_SIZE = 16;
+    static constexpr size_t ENTRY_SIZE = sizeof(std::pair<KeyType, ValueType>);
+    static constexpr size_t BUCKET_ARRAY_SIZE = (PAGE_SIZE - BUCKET_HEADER_SIZE) / ENTRY_SIZE;
+
+    ExtendibleHTableBucketPage() = default;
+
+    /**
+     * @brief Initialize a bucket page.
+     * @param page_id The physical page ID assigned to this bucket.
+     * @param max_size Maximum key-value capacity of this bucket (default: BUCKET_ARRAY_SIZE).
+     */
+    void Init(page_id_t page_id, uint32_t max_size = BUCKET_ARRAY_SIZE) {
+        page_id_ = page_id;
+        size_ = 0;
+        max_size_ = (max_size > 0 && max_size <= BUCKET_ARRAY_SIZE) ? max_size : static_cast<uint32_t>(BUCKET_ARRAY_SIZE);
+        reserved_ = 0;
+    }
+
+    /**
+     * @brief Look up a key in the bucket.
+     * @param key Key to search for.
+     * @param result Pointer to store the value if found.
+     * @return true if key found, false otherwise.
+     */
+    bool Lookup(const KeyType &key, ValueType *result) const {
+        for (uint32_t i = 0; i < size_; ++i) {
+            if (entries_[i].first == key) {
+                if (result) {
+                    *result = entries_[i].second;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @brief Insert or update a key-value pair.
+     * @param key Key to insert.
+     * @param value Value to insert.
+     * @return true if inserted or updated, false if bucket is full and key does not exist.
+     */
+    bool Insert(const KeyType &key, const ValueType &value) {
+        for (uint32_t i = 0; i < size_; ++i) {
+            if (entries_[i].first == key) {
+                entries_[i].second = value;
+                return true;
+            }
+        }
+        if (IsFull()) {
+            return false;
+        }
+        new (&entries_[size_]) std::pair<KeyType, ValueType>(key, value);
+        ++size_;
+        return true;
+    }
+
+    /**
+     * @brief Remove a key-value pair from the bucket.
+     * Replaces removed entry with the last entry for O(1) removal.
+     * @param key Key to remove.
+     * @return true if found and removed, false otherwise.
+     */
+    bool Remove(const KeyType &key) {
+        for (uint32_t i = 0; i < size_; ++i) {
+            if (entries_[i].first == key) {
+                if (i + 1 < size_) {
+                    entries_[i] = std::move(entries_[size_ - 1]);
+                }
+                entries_[size_ - 1].~pair();
+                --size_;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool IsFull() const { return size_ >= max_size_; }
+    bool IsEmpty() const { return size_ == 0; }
+    uint32_t Size() const { return size_; }
+    uint32_t MaxSize() const { return max_size_; }
+
+    const KeyType &KeyAt(uint32_t idx) const { return entries_[idx].first; }
+    const ValueType &ValueAt(uint32_t idx) const { return entries_[idx].second; }
+    const std::pair<KeyType, ValueType> &EntryAt(uint32_t idx) const { return entries_[idx]; }
+
+    void Clear() {
+        for (uint32_t i = 0; i < size_; ++i) {
+            entries_[i].~pair();
+        }
+        size_ = 0;
+    }
+
+    page_id_t GetPageId() const { return page_id_; }
+    void SetPageId(page_id_t page_id) { page_id_ = page_id; }
+
+private:
+    page_id_t page_id_{INVALID_PAGE_ID};
+    uint32_t size_{0};
+    uint32_t max_size_{BUCKET_ARRAY_SIZE};
+    uint32_t reserved_{0};
+    std::pair<KeyType, ValueType> entries_[BUCKET_ARRAY_SIZE];
+};
+
+static_assert(sizeof(ExtendibleHTableBucketPage<int64_t, int64_t>) <= PAGE_SIZE,
+              "ExtendibleHTableBucketPage must fit within PAGE_SIZE");
