@@ -17,6 +17,7 @@ set(COMMON_SOURCES
     src/disk_manager.cpp
     src/buffer_pool_manager.cpp
     src/table_page.cpp
+    src/table_heap.cpp
 )
 
 set(COMMON_HEADERS
@@ -27,6 +28,7 @@ set(COMMON_HEADERS
     include/rid.h
     include/tuple.h
     include/table_page.h
+    include/table_heap.h
 )
 
 # ==================== Main Executable ====================
@@ -213,6 +215,29 @@ else()
     message(WARNING "rid_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/rid_test.cpp")
 endif()
 
+# 8. Table Heap Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/table_heap_test.cpp)
+    message(STATUS "Found table_heap_test.cpp")
+    add_executable(table_heap_test
+        tests/table_heap_test.cpp
+    )
+    
+    target_link_libraries(table_heap_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(table_heap_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(table_heap_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "table_heap_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/table_heap_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -253,6 +278,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "7. Running RID Tests..."
     COMMAND ./rid_test || echo "RID tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "8. Running Table Heap Tests..."
+    COMMAND ./table_heap_test || echo "Table Heap tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -264,6 +292,7 @@ add_custom_target(run_all_tests
         buffer_pool_manager_test
         table_page_test
         rid_test
+        table_heap_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )
