@@ -83,6 +83,12 @@ public:
     size_t GetEvictableCount() const;
 
     /**
+     * @brief Number of evictable frames (CMU 15-445 BusTub alias for GetEvictableCount()).
+     * @return Number of evictable frames.
+     */
+    size_t Size() const { return GetEvictableCount(); }
+
+    /**
      * @brief Get the lifetime number of frames evicted by this replacer instance.
      * @return Eviction count.
      */

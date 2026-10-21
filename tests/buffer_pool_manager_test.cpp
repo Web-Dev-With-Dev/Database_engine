@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -631,5 +632,300 @@ TEST_F(BufferPoolManagerTest, AllPagesPinnedEdgeCases) {
     bpm.UnpinPage(pid1, false);
     bpm.UnpinPage(pid2, false);
 }
+
+// ============================================================================
+// CMU 15-445 (BusTub) Project #1 Canonical Test Suite & Edge Cases
+// ============================================================================
+
+/**
+ * @brief CMU 15-445 Project #1 Canonical Sample Test.
+ * Allocates 10 pages, modifies page 0, unpins all.
+ * Allocates page 10 (forces eviction of page 0 to disk).
+ * Fetches page 0 back into pool and verifies content persisted.
+ * Deletes page 0 and verifies free frame reclamation.
+ */
+TEST_F(BufferPoolManagerTest, CMU15445_SampleTest) {
+    const size_t pool_size = 10;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t page_id_temp;
+    auto *page0 = bpm.NewPage(&page_id_temp);
+    ASSERT_NE(page0, nullptr);
+    EXPECT_EQ(0, page_id_temp);
+
+    // Scenario: We should be able to create new pages until we fill up the buffer pool.
+    std::vector<page_id_t> pages;
+    pages.push_back(page_id_temp);
+    std::snprintf(page0->GetData(), PAGE_SIZE, "Hello");
+
+    for (size_t i = 1; i < pool_size; ++i) {
+        auto *page = bpm.NewPage(&page_id_temp);
+        ASSERT_NE(page, nullptr);
+        pages.push_back(page_id_temp);
+    }
+
+    // Unpin all pages, marking page 0 dirty
+    bpm.UnpinPage(pages[0], true);
+    for (size_t i = 1; i < pool_size; ++i) {
+        bpm.UnpinPage(pages[i], false);
+    }
+
+    // Allocate 10 more pages, forcing eviction of all previous 10 pages
+    for (size_t i = 0; i < pool_size; ++i) {
+        auto *page = bpm.NewPage(&page_id_temp);
+        ASSERT_NE(page, nullptr);
+        bpm.UnpinPage(page_id_temp, false);
+    }
+
+    // Page 0 should have been evicted to disk
+    EXPECT_FALSE(bpm.IsPageInPool(0));
+
+    // Fetch page 0 back from disk and verify its content was written back
+    auto *fetched_page0 = bpm.FetchPage(0);
+    ASSERT_NE(fetched_page0, nullptr);
+    EXPECT_STREQ("Hello", fetched_page0->GetData());
+
+    // Unpin fetched page 0
+    EXPECT_TRUE(bpm.UnpinPage(0, false));
+
+    // Delete page 0: must return true
+    EXPECT_TRUE(bpm.DeletePage(0));
+    EXPECT_FALSE(bpm.IsPageInPool(0));
+}
+
+/**
+ * @brief CMU 15-445 Project #1 Canonical BinaryDataTest.
+ * Tests full 4096-byte pages filled with arbitrary non-ASCII binary patterns
+ * (including 0x00, 0xFF, random byte streams) across multiple eviction cycles.
+ * Validates that binary data is neither truncated nor corrupted by disk transfers.
+ */
+TEST_F(BufferPoolManagerTest, CMU15445_BinaryDataFullPageTest) {
+    const size_t pool_size = 5;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    const size_t num_pages = 10;
+    std::vector<std::vector<char>> expected_data(num_pages, std::vector<char>(PAGE_SIZE));
+    std::vector<page_id_t> page_ids(num_pages);
+
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> byte_dist(0, 255);
+
+    // 1. Allocate pages and fill with randomized binary data
+    for (size_t i = 0; i < num_pages; ++i) {
+        Page *page = bpm.NewPage(&page_ids[i]);
+        ASSERT_NE(page, nullptr);
+
+        for (size_t b = 0; b < PAGE_SIZE; ++b) {
+            expected_data[i][b] = static_cast<char>(byte_dist(rng));
+        }
+        // Ensure embedded null bytes exist to verify non-string binary safety
+        expected_data[i][0] = '\0';
+        expected_data[i][PAGE_SIZE / 2] = '\0';
+        expected_data[i][PAGE_SIZE - 1] = static_cast<char>(0xFF);
+
+        std::memcpy(page->GetData(), expected_data[i].data(), PAGE_SIZE);
+        // Unpin page as dirty so it gets written to disk when evicted
+        EXPECT_TRUE(bpm.UnpinPage(page_ids[i], true));
+    }
+
+    // 2. Fetch all pages back through multiple eviction rounds and verify byte exactness
+    for (size_t i = 0; i < num_pages; ++i) {
+        Page *page = bpm.FetchPage(page_ids[i]);
+        ASSERT_NE(page, nullptr);
+        EXPECT_EQ(0, std::memcmp(page->GetData(), expected_data[i].data(), PAGE_SIZE));
+        EXPECT_TRUE(bpm.UnpinPage(page_ids[i], false));
+    }
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: NewPage with nullptr as page_id out-parameter.
+ * Validates that passing nullptr does not cause segfault or undefined behavior.
+ */
+TEST_F(BufferPoolManagerTest, CMU15445_NewPageNullptrSafety) {
+    const size_t pool_size = 2;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    Page *p0 = bpm.NewPage(nullptr);
+    ASSERT_NE(p0, nullptr);
+    EXPECT_EQ(p0->GetPinCount(), 1);
+
+    page_id_t pid0 = p0->GetPageId();
+    EXPECT_GE(pid0, 0);
+
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_TRUE(bpm.DeletePage(pid0));
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: Dirty Flag Stickiness Across Interleaved Unpins.
+ * In CMU 15-445, once a page is marked dirty via UnpinPage(..., true), subsequent
+ * unpins with UnpinPage(..., false) must NOT clear the dirty flag!
+ */
+TEST_F(BufferPoolManagerTest, CMU15445_UnpinDirtyStickyFlag) {
+    const size_t pool_size = 2;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t pid;
+    Page *p = bpm.NewPage(&pid);
+    ASSERT_NE(p, nullptr);
+
+    // Pin count is 1. Increment to 2.
+    Page *p_again = bpm.FetchPage(pid);
+    ASSERT_EQ(p, p_again);
+    EXPECT_EQ(2, p->GetPinCount());
+    EXPECT_FALSE(p->IsDirty());
+
+    // Worker 1 modifies data and unpins with is_dirty = true
+    std::snprintf(p->GetData(), PAGE_SIZE, "Sticky Dirty Test");
+    EXPECT_TRUE(bpm.UnpinPage(pid, true));
+    EXPECT_EQ(1, p->GetPinCount());
+    EXPECT_TRUE(p->IsDirty());
+
+    // Worker 2 reads data and unpins with is_dirty = false
+    EXPECT_TRUE(bpm.UnpinPage(pid, false));
+    EXPECT_EQ(0, p->GetPinCount());
+    // Dirty flag MUST remain true!
+    EXPECT_TRUE(p->IsDirty());
+
+    // Force eviction of pid by filling frame 1 with 2 accesses so pid (frame 0) has the older k-th access
+    page_id_t pid1, pid2;
+    bpm.NewPage(&pid1);
+    bpm.FetchPage(pid1);
+    bpm.UnpinPage(pid1, false);
+    bpm.UnpinPage(pid1, false);
+
+    // Now both frame 0 and frame 1 have 2 accesses.
+    // Frame 0 has earlier backward k-distance timestamp, so pid2 allocation evicts frame 0 (pid).
+    bpm.NewPage(&pid2);
+    bpm.UnpinPage(pid2, false);
+
+    EXPECT_FALSE(bpm.IsPageInPool(pid));
+
+    // Verify disk content was written due to sticky dirty flag
+    char disk_buf[PAGE_SIZE] = {};
+    disk_manager_->ReadPage(pid, disk_buf);
+    EXPECT_STREQ("Sticky Dirty Test", disk_buf);
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: DeletePage on dirty unpinned page discards it.
+ * Deleting a dirty page while unpinned must immediately free the frame to the free list
+ * without throwing, and subsequent FetchPage reads the disk image.
+ */
+TEST_F(BufferPoolManagerTest, CMU15445_DeletePageDiscardDirty) {
+    const size_t pool_size = 2;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t pid;
+    Page *p = bpm.NewPage(&pid);
+    ASSERT_NE(p, nullptr);
+    std::snprintf(p->GetData(), PAGE_SIZE, "Never Written Content");
+
+    bpm.UnpinPage(pid, true);
+    EXPECT_TRUE(p->IsDirty());
+
+    // Deleting dirty page should discard it and return the frame
+    EXPECT_TRUE(bpm.DeletePage(pid));
+    EXPECT_FALSE(bpm.IsPageInPool(pid));
+    EXPECT_EQ(2, bpm.GetFreeListSize());
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: BufferPoolManager Destructor Automatically Flushes Dirty Pages.
+ * Ensures that un-flushed dirty pages are safely written to disk when BPM is destroyed.
+ */
+TEST_F(BufferPoolManagerTest, CMU15445_DestructorFlushPersistence) {
+    page_id_t pid0, pid1;
+
+    // 1. First BPM instance writes dirty data and is destroyed without explicit FlushPage
+    {
+        BufferPoolManager bpm(5, disk_manager_.get());
+        Page *p0 = bpm.NewPage(&pid0);
+        Page *p1 = bpm.NewPage(&pid1);
+        ASSERT_NE(p0, nullptr);
+        ASSERT_NE(p1, nullptr);
+
+        std::snprintf(p0->GetData(), PAGE_SIZE, "Auto-Flushed Page 0");
+        std::snprintf(p1->GetData(), PAGE_SIZE, "Auto-Flushed Page 1");
+
+        bpm.UnpinPage(pid0, true);
+        bpm.UnpinPage(pid1, true);
+        // bpm destructor executes here
+    }
+
+    // 2. Second BPM instance attaches to the same file and verifies data is intact
+    {
+        BufferPoolManager bpm2(5, disk_manager_.get());
+        Page *p0 = bpm2.FetchPage(pid0);
+        Page *p1 = bpm2.FetchPage(pid1);
+
+        ASSERT_NE(p0, nullptr);
+        ASSERT_NE(p1, nullptr);
+
+        EXPECT_STREQ("Auto-Flushed Page 0", p0->GetData());
+        EXPECT_STREQ("Auto-Flushed Page 1", p1->GetData());
+
+        bpm2.UnpinPage(pid0, false);
+        bpm2.UnpinPage(pid1, false);
+    }
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: Multiple Pins Prevent Eviction until completely unpinned.
+ * A page pinned 3 times must not be evicted after 1 or 2 unpins.
+ */
+TEST_F(BufferPoolManagerTest, CMU15445_MultiplePinsPreventEviction) {
+    const size_t pool_size = 2;
+    BufferPoolManager bpm(pool_size, disk_manager_.get());
+
+    page_id_t pid0, pid1;
+    Page *p0 = bpm.NewPage(&pid0);
+    Page *p1 = bpm.NewPage(&pid1);
+    ASSERT_NE(p0, nullptr);
+    ASSERT_NE(p1, nullptr);
+
+    // Pin p0 three times
+    bpm.FetchPage(pid0);
+    bpm.FetchPage(pid0);
+    EXPECT_EQ(3, p0->GetPinCount());
+
+    // Unpin p1 so p1 is evictable
+    bpm.UnpinPage(pid1, false);
+    EXPECT_EQ(0, p1->GetPinCount());
+
+    // Allocating p2 evicts p1 (p0 cannot be evicted)
+    page_id_t pid2;
+    Page *p2 = bpm.NewPage(&pid2);
+    ASSERT_NE(p2, nullptr);
+    EXPECT_TRUE(bpm.IsPageInPool(pid0));
+    EXPECT_FALSE(bpm.IsPageInPool(pid1));
+
+    // Unpin p0 twice (pin count: 3 -> 2 -> 1)
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_EQ(2, p0->GetPinCount());
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_EQ(1, p0->GetPinCount());
+
+    // Still pinned (count 1): NewPage must fail because p0 and p2 are both pinned!
+    page_id_t pid3 = 888;
+    Page *p3 = bpm.NewPage(&pid3);
+    EXPECT_EQ(p3, nullptr);
+    EXPECT_EQ(pid3, INVALID_PAGE_ID);
+
+    // Unpin p0 completely (count -> 0)
+    EXPECT_TRUE(bpm.UnpinPage(pid0, false));
+    EXPECT_EQ(0, p0->GetPinCount());
+
+    // Now p0 can be evicted!
+    p3 = bpm.NewPage(&pid3);
+    ASSERT_NE(p3, nullptr);
+    EXPECT_FALSE(bpm.IsPageInPool(pid0));
+    EXPECT_TRUE(bpm.IsPageInPool(pid2));
+    EXPECT_TRUE(bpm.IsPageInPool(pid3));
+
+    bpm.UnpinPage(pid2, false);
+    bpm.UnpinPage(pid3, false);
+}
+
 
 

@@ -246,6 +246,194 @@ TEST_F(LRUKReplacerTest, StressTestRandom) {
     }
 }
 
+// ==================== CMU 15-445 Project #1 Edge Case Tests ====================
+
+/**
+ * @brief Canonical CMU 15-445 BusTub Project #1 LRU-K Replacer Sample Test.
+ * Tests frames [1, 2, 3, 4, 5] with k=2.
+ * Frame 4 has +inf backward distance and is evicted first.
+ * Then frames 2, 3, 1 are evicted according to their 2nd-to-last access times.
+ */
+TEST_F(LRUKReplacerTest, CMU15445_SampleTest) {
+    LRUKReplacer lru_replacer(7, 2);
+
+    // Scenario: Add six frames to the replacer: [1, 2, 3, 4, 5]. Frame 6 not touched.
+    lru_replacer.RecordAccess(1);
+    lru_replacer.RecordAccess(2);
+    lru_replacer.RecordAccess(3);
+    lru_replacer.RecordAccess(4);
+    lru_replacer.RecordAccess(1);
+    lru_replacer.RecordAccess(2);
+    lru_replacer.RecordAccess(3);
+    lru_replacer.RecordAccess(1);
+
+    // Enable evicting on frames 1, 2, 3, 4. Frame 5 is unevictable.
+    lru_replacer.SetEvictable(1, true);
+    lru_replacer.SetEvictable(2, true);
+    lru_replacer.SetEvictable(3, true);
+    lru_replacer.SetEvictable(4, true);
+    lru_replacer.SetEvictable(5, false);
+
+    // Size (evictable count) should be 4.
+    EXPECT_EQ(4, lru_replacer.Size());
+
+    // Frame 5 receives accesses while unevictable
+    lru_replacer.RecordAccess(5);
+    lru_replacer.RecordAccess(5);
+    lru_replacer.SetEvictable(5, false);
+    EXPECT_EQ(4, lru_replacer.Size());
+
+    // Evict frame: Frame 4 has infinite backward k-distance (count = 1 < 2), so it must be evicted first!
+    int victim = lru_replacer.Evict();
+    EXPECT_EQ(4, victim);
+    EXPECT_EQ(3, lru_replacer.Size());
+
+    // Next evictions: frames 1, 2, 3 all have >= 2 accesses.
+    // 2nd-to-last access timestamps:
+    // Frame 2: timestamp 2
+    // Frame 3: timestamp 3
+    // Frame 1: timestamp 5 (accesses were at 1, 5, 8)
+    // Smallest timestamp (largest backward distance) is Frame 2, then Frame 3, then Frame 1.
+    EXPECT_EQ(2, lru_replacer.Evict());
+    EXPECT_EQ(2, lru_replacer.Size());
+
+    EXPECT_EQ(3, lru_replacer.Evict());
+    EXPECT_EQ(1, lru_replacer.Size());
+
+    EXPECT_EQ(1, lru_replacer.Evict());
+    EXPECT_EQ(0, lru_replacer.Size());
+
+    // No evictable frames remain
+    EXPECT_EQ(-1, lru_replacer.Evict());
+
+    // Now set frame 5 evictable
+    lru_replacer.SetEvictable(5, true);
+    EXPECT_EQ(1, lru_replacer.Size());
+
+    EXPECT_EQ(5, lru_replacer.Evict());
+    EXPECT_EQ(0, lru_replacer.Size());
+    EXPECT_EQ(-1, lru_replacer.Evict());
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: Infinite Backward Distance Ties Broken by FIFO.
+ * When multiple frames have fewer than k accesses, all have +inf backward distance.
+ * The policy requires evicting them in strict FIFO order based on earliest timestamp.
+ */
+TEST_F(LRUKReplacerTest, CMU15445_EvictionTiesEarliestTimestampFIFO) {
+    LRUKReplacer replacer(5, 3);  // k = 3
+
+    // Access frames 0, 1, 2 once each (all have < 3 accesses, so +inf distance)
+    replacer.RecordAccess(0);
+    replacer.RecordAccess(1);
+    replacer.RecordAccess(2);
+
+    replacer.SetEvictable(0, true);
+    replacer.SetEvictable(1, true);
+    replacer.SetEvictable(2, true);
+    EXPECT_EQ(3, replacer.Size());
+
+    // Strict FIFO order: 0 was first, 1 second, 2 third
+    EXPECT_EQ(0, replacer.Evict());
+    EXPECT_EQ(1, replacer.Evict());
+    EXPECT_EQ(2, replacer.Evict());
+    EXPECT_EQ(0, replacer.Size());
+    EXPECT_EQ(-1, replacer.Evict());
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: Evicted Frame Has History Completely Reset.
+ * If a frame is evicted and later accessed again, it must start with access count 1
+ * and enter the cold queue with +inf distance.
+ */
+TEST_F(LRUKReplacerTest, CMU15445_EvictedFrameHistoryWiped) {
+    LRUKReplacer replacer(4, 2);
+
+    // Frame 1 accessed 5 times
+    for (int i = 0; i < 5; ++i) {
+        replacer.RecordAccess(1);
+    }
+    replacer.SetEvictable(1, true);
+    EXPECT_EQ(5, replacer.GetAccessCount(1));
+
+    // Evict frame 1
+    EXPECT_EQ(1, replacer.Evict());
+    EXPECT_EQ(0, replacer.GetAccessCount(1));
+    EXPECT_FALSE(replacer.IsEvictable(1));
+
+    // Re-access frame 1: must start with access count 1 (cold queue, +inf distance)
+    replacer.RecordAccess(1);
+    replacer.SetEvictable(1, true);
+    EXPECT_EQ(1, replacer.GetAccessCount(1));
+
+    // Frame 2 accessed twice (k=2, hot queue)
+    replacer.RecordAccess(2);
+    replacer.RecordAccess(2);
+    replacer.SetEvictable(2, true);
+
+    // Frame 1 (+inf distance) must be evicted BEFORE Frame 2 (finite distance)
+    EXPECT_EQ(1, replacer.Evict());
+    EXPECT_EQ(2, replacer.Evict());
+    EXPECT_EQ(-1, replacer.Evict());
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: Idempotent SetEvictable and Unpin calls.
+ * Repeated calls to SetEvictable(fid, true) or Unpin(fid) on an already evictable
+ * frame must not duplicate queue entries or corrupt the evictable size.
+ */
+TEST_F(LRUKReplacerTest, CMU15445_IdempotentSetEvictableAndUnpin) {
+    LRUKReplacer replacer(5, 2);
+
+    replacer.RecordAccess(0);
+    replacer.SetEvictable(0, true);
+    EXPECT_EQ(1, replacer.Size());
+
+    // Repeated SetEvictable(true)
+    replacer.SetEvictable(0, true);
+    replacer.SetEvictable(0, true);
+    EXPECT_EQ(1, replacer.Size());
+
+    // Repeated Unpin()
+    replacer.Unpin(0);
+    replacer.Unpin(0);
+    EXPECT_EQ(1, replacer.Size());
+
+    // Single eviction should exhaust it
+    EXPECT_EQ(0, replacer.Evict());
+    EXPECT_EQ(0, replacer.Size());
+    EXPECT_EQ(-1, replacer.Evict());
+}
+
+/**
+ * @brief CMU 15-445 Edge Case: Dynamic Queue Migration While Evictable.
+ * An evictable frame in the cold queue (< k accesses) receives another access,
+ * pushing it to >= k accesses. It must dynamically transition to the hot queue.
+ */
+TEST_F(LRUKReplacerTest, CMU15445_DynamicQueueMigration) {
+    LRUKReplacer replacer(4, 2);
+
+    // Frame 0: accessed 1 time, evictable (cold queue)
+    replacer.RecordAccess(0);
+    replacer.SetEvictable(0, true);
+
+    // Frame 1: accessed 1 time, evictable (cold queue)
+    replacer.RecordAccess(1);
+    replacer.SetEvictable(1, true);
+
+    EXPECT_EQ(2, replacer.Size());
+
+    // Now give Frame 0 a 2nd access while still evictable -> transitions to hot queue!
+    replacer.RecordAccess(0);
+    EXPECT_EQ(2, replacer.Size());
+
+    // Frame 1 has 1 access (+inf distance), Frame 0 has 2 accesses (finite distance).
+    // Frame 1 must be evicted first!
+    EXPECT_EQ(1, replacer.Evict());
+    EXPECT_EQ(0, replacer.Evict());
+    EXPECT_EQ(-1, replacer.Evict());
+}
+
 // ==================== Performance Benchmark ====================
 
 TEST(LRUKReplacerBenchmark, PerformanceTest) {
