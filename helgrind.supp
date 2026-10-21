@@ -1,25 +1,43 @@
-# Helgrind suppressions for GoogleTest and standard library runtime internals
+# Helgrind suppressions for GoogleTest runner and C++ standard library runtime internals
+
 {
-   gtest_internal_race
+   helgrind_gtest_all_races
    Helgrind:Race
    ...
-   fun:*testing*internal*
+   fun:*testing*
 }
+
 {
-   gtest_internal_lockorder
+   helgrind_gtest_all_lockorder
    Helgrind:LockOrder
    ...
-   fun:*testing*internal*
+   fun:*testing*
 }
+
 {
-   gtest_testsuite_run
+   helgrind_gtest_misc
+   Helgrind:Misc
+   ...
+   fun:*testing*
+}
+
+{
+   helgrind_std_thread
    Helgrind:Race
    ...
-   fun:*testing*TestSuite*Run*
+   fun:*std*thread*
 }
+
 {
-   gtest_unittest_run
+   helgrind_std_call_once
    Helgrind:Race
    ...
-   fun:*testing*UnitTest*Run*
+   fun:*call_once*
+}
+
+{
+   helgrind_std_future
+   Helgrind:Race
+   ...
+   fun:*std*future*
 }

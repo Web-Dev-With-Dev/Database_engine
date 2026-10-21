@@ -111,11 +111,13 @@ jobs:
           cmake -B build-valgrind -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER=clang-17 \
-            -DCMAKE_CXX_COMPILER=clang++-17
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -DCMAKE_C_FLAGS="-gdwarf-4" \
+            -DCMAKE_CXX_FLAGS="-gdwarf-4"
 
       - name: Build BPM Concurrent Test for Helgrind
         run: cmake --build build-valgrind --target buffer_pool_manager_concurrent_test
 
       - name: Run Concurrent Stress Test under Valgrind Helgrind
         run: |
-          valgrind --tool=helgrind --error-exitcode=1 --read-var-info=yes --track-lockorders=yes --suppressions=helgrind.supp ./build-valgrind/buffer_pool_manager_concurrent_test
+          valgrind --tool=helgrind --error-exitcode=1 -s --read-var-info=yes --track-lockorders=yes --suppressions=helgrind.supp ./build-valgrind/buffer_pool_manager_concurrent_test

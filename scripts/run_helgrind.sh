@@ -24,7 +24,9 @@ echo " Building DittoDB Debug Binary for Helgrind"
 echo "=========================================================="
 
 cmake -B "${BUILD_DIR}" -S "${ROOT_DIR}" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_FLAGS="-gdwarf-4" \
+  -DCMAKE_CXX_FLAGS="-gdwarf-4"
 
 cmake --build "${BUILD_DIR}" --target buffer_pool_manager_concurrent_test
 
@@ -41,6 +43,7 @@ fi
 valgrind \
   --tool=helgrind \
   --error-exitcode=1 \
+  -s \
   --read-var-info=yes \
   --track-lockorders=yes \
   ${SUPP_OPT} \

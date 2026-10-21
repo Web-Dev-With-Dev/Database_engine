@@ -6,9 +6,19 @@ Page::Page()
       is_dirty_(false)
 {
     data_.fill(0);
+#if defined(__unix__) || defined(__APPLE__)
+    pthread_rwlock_init(&latch_, nullptr);
+#endif
 }
 
-//Getters
+Page::~Page()
+{
+#if defined(__unix__) || defined(__APPLE__)
+    pthread_rwlock_destroy(&latch_);
+#endif
+}
+
+// Getters
 
 page_id_t Page::GetPageId() const
 {
@@ -35,7 +45,7 @@ const char *Page::GetData() const
     return data_.data();
 }
 
-//Setters
+// Setters
 
 void Page::SetPageId(page_id_t id)
 {
@@ -47,7 +57,7 @@ void Page::SetDirty(bool dirty)
     is_dirty_.store(dirty);
 }
 
-//Pin Management
+// Pin Management
 
 void Page::Pin()
 {
@@ -62,24 +72,40 @@ void Page::Unpin()
     }
 }
 
-//Latching
+// Latching
 
 void Page::WLatch()
 {
+#if defined(__unix__) || defined(__APPLE__)
+    pthread_rwlock_wrlock(&latch_);
+#else
     latch_.lock();
+#endif
 }
 
 void Page::WUnlatch()
 {
+#if defined(__unix__) || defined(__APPLE__)
+    pthread_rwlock_unlock(&latch_);
+#else
     latch_.unlock();
+#endif
 }
 
 void Page::RLatch()
 {
+#if defined(__unix__) || defined(__APPLE__)
+    pthread_rwlock_rdlock(&latch_);
+#else
     latch_.lock_shared();
+#endif
 }
 
 void Page::RUnlatch()
 {
+#if defined(__unix__) || defined(__APPLE__)
+    pthread_rwlock_unlock(&latch_);
+#else
     latch_.unlock_shared();
+#endif
 }
