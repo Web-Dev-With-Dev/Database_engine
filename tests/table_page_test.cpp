@@ -1044,4 +1044,389 @@ TEST_F(TablePageTest, IteratorConstPageAccess) {
     EXPECT_EQ(const_page.cbegin()->AsStringView(), "Const read 1");
 }
 
+// ============================================================================
+// Insert Until Full, Delete + Reinsert, & RID Stability Tests
+// ============================================================================
+
+TEST_F(TablePageTest, InsertUntilFull_FillSequential) {
+    TablePage page;
+    page.Init(1);
+
+    const size_t payload_size = 64;
+    std::vector<RID> rids;
+    std::vector<std::string> payloads;
+
+    // Insert 64-byte tuples until the page is completely full
+    int counter = 0;
+    while (true) {
+        std::string payload = "Row_" + std::to_string(counter) + "_" + std::string(payload_size - 10, 'A' + (counter % 26));
+        payload.resize(payload_size);
+
+        RID rid;
+        bool inserted = page.InsertTuple(Tuple(payload), &rid);
+        if (!inserted) {
+            break;
+        }
+
+        EXPECT_EQ(rid.GetPageId(), 1);
+        EXPECT_EQ(rid.GetSlotNum(), counter);
+        rids.push_back(rid);
+        payloads.push_back(payload);
+        counter++;
+    }
+
+    // Capacity calculation:
+    // Page: 4096 bytes, Header: 24 bytes -> 4072 bytes free space.
+    // Each tuple takes 64 bytes data + 8 bytes slot entry = 72 bytes.
+    // Expected tuples = 4072 / 72 = 56 tuples (56 * 72 = 4032 bytes, leaving 40 bytes free).
+    EXPECT_GT(counter, 50);
+    EXPECT_EQ(page.GetNumTuples(), static_cast<uint32_t>(counter));
+    EXPECT_LT(page.GetFreeSpaceRemaining(), payload_size + TablePage::SIZEOF_TUPLE_SLOT);
+
+    // Verify rejection of further insertions once full
+    RID reject_rid;
+    // 1. Same-sized tuple rejection
+    EXPECT_FALSE(page.InsertTuple(Tuple(std::string(payload_size, 'X')), &reject_rid));
+    // 2. Larger tuple rejection
+    EXPECT_FALSE(page.InsertTuple(Tuple(std::string(200, 'Y')), &reject_rid));
+    // 3. Even smaller tuple if space is insufficient for data + slot
+    EXPECT_FALSE(page.InsertTuple(Tuple(std::string(page.GetFreeSpaceRemaining(), 'Z')), &reject_rid));
+
+    // Page state remains valid and unchanged
+    EXPECT_EQ(page.GetNumTuples(), static_cast<uint32_t>(counter));
+
+    // Verify EVERY inserted tuple is intact, uncorrupted, and matches its RID
+    for (size_t i = 0; i < rids.size(); ++i) {
+        Tuple read_tuple;
+        ASSERT_TRUE(page.GetTuple(rids[i], &read_tuple)) << "Failed reading tuple at index " << i;
+        EXPECT_EQ(read_tuple.AsStringView(), payloads[i]);
+        EXPECT_EQ(read_tuple.GetRid(), rids[i]);
+
+        // Slot offset validation: offsets must be within bounds and decreasing
+        uint32_t offset = page.GetTupleOffset(rids[i].GetSlotNum());
+        EXPECT_GE(offset, page.GetFreeSpacePointer());
+        EXPECT_LE(offset + payload_size, PAGE_SIZE);
+    }
+}
+
+TEST_F(TablePageTest, InsertUntilFull_ExactZeroRemaining) {
+    TablePage page;
+    page.Init(1);
+
+    // Initial free space: 4096 - 24 = 4072 bytes.
+    // 4072 / 8 = 509 bytes per slot.
+    // Tuple payload = 509 - 8 (slot size) = 501 bytes.
+    // 8 tuples * (501 + 8) = 4072 bytes -> exactly 0 free space remaining!
+    const size_t tuple_size = 501;
+    const size_t num_exact_tuples = 8;
+    std::vector<RID> rids;
+
+    for (size_t i = 0; i < num_exact_tuples; ++i) {
+        std::string data(tuple_size, static_cast<char>('A' + i));
+        RID rid;
+        ASSERT_TRUE(page.InsertTuple(Tuple(data), &rid));
+        rids.push_back(rid);
+    }
+
+    // Contiguous free space must be exactly 0
+    EXPECT_EQ(page.GetFreeSpaceRemaining(), 0);
+    EXPECT_EQ(page.GetTotalFreeSpace(), 0);
+    EXPECT_EQ(page.GetNumTuples(), num_exact_tuples);
+
+    // Any insertion, even 1 single byte, must fail
+    RID fail_rid;
+    EXPECT_FALSE(page.InsertTuple(Tuple("!"), &fail_rid));
+
+    // Verify all 8 tuples are correct
+    for (size_t i = 0; i < num_exact_tuples; ++i) {
+        Tuple read_tuple;
+        ASSERT_TRUE(page.GetTuple(rids[i], &read_tuple));
+        EXPECT_EQ(read_tuple.AsStringView(), std::string(tuple_size, static_cast<char>('A' + i)));
+    }
+}
+
+TEST_F(TablePageTest, DeleteAndReinsert_SlotReuse) {
+    TablePage page;
+    page.Init(1);
+
+    RID r0, r1, r2, r3, r4;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot0_original"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot1_to_delete"), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot2_original"), &r2));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot3_to_delete"), &r3));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot4_original"), &r4));
+
+    EXPECT_EQ(page.GetNumTuples(), 5);
+
+    // Delete slot 1 and slot 3 using ApplyDelete
+    EXPECT_TRUE(page.ApplyDelete(r1));
+    EXPECT_TRUE(page.ApplyDelete(r3));
+
+    EXPECT_TRUE(page.IsTupleDeleted(1));
+    EXPECT_TRUE(page.IsTupleDeleted(3));
+
+    // Reinsert first tuple: must reuse earliest empty slot (slot 1) without incrementing num_tuples
+    RID r_new1;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot1_reused_new"), &r_new1));
+    EXPECT_EQ(r_new1.GetSlotNum(), 1);
+    EXPECT_EQ(page.GetNumTuples(), 5); // Did not grow!
+
+    // Reinsert second tuple: must reuse next empty slot (slot 3) without incrementing num_tuples
+    RID r_new2;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot3_reused_new"), &r_new2));
+    EXPECT_EQ(r_new2.GetSlotNum(), 3);
+    EXPECT_EQ(page.GetNumTuples(), 5); // Did not grow!
+
+    // Insert third tuple: all holes filled, so must append to slot 5 and increment num_tuples
+    RID r_new3;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Slot5_appended"), &r_new3));
+    EXPECT_EQ(r_new3.GetSlotNum(), 5);
+    EXPECT_EQ(page.GetNumTuples(), 6);
+
+    // Verify all 6 tuples in page
+    Tuple t0, t1, t2, t3, t4, t5;
+    EXPECT_TRUE(page.GetTuple(r0, &t0));
+    EXPECT_EQ(t0.AsStringView(), "Slot0_original");
+
+    EXPECT_TRUE(page.GetTuple(r_new1, &t1));
+    EXPECT_EQ(t1.AsStringView(), "Slot1_reused_new");
+
+    EXPECT_TRUE(page.GetTuple(r2, &t2));
+    EXPECT_EQ(t2.AsStringView(), "Slot2_original");
+
+    EXPECT_TRUE(page.GetTuple(r_new2, &t3));
+    EXPECT_EQ(t3.AsStringView(), "Slot3_reused_new");
+
+    EXPECT_TRUE(page.GetTuple(r4, &t4));
+    EXPECT_EQ(t4.AsStringView(), "Slot4_original");
+
+    EXPECT_TRUE(page.GetTuple(r_new3, &t5));
+    EXPECT_EQ(t5.AsStringView(), "Slot5_appended");
+}
+
+TEST_F(TablePageTest, DeleteAndReinsert_FullPageReclaim) {
+    TablePage page;
+    page.Init(1);
+
+    // Fill page until full with 100-byte tuples
+    const size_t sz = 100;
+    std::vector<RID> rids;
+    while (true) {
+        std::string data = "Tuple_" + std::to_string(rids.size()) + "_" + std::string(sz - 12, '#');
+        data.resize(sz);
+        RID rid;
+        if (!page.InsertTuple(Tuple(data), &rid)) {
+            break;
+        }
+        rids.push_back(rid);
+    }
+
+    size_t initial_count = rids.size();
+    EXPECT_GT(initial_count, 30);
+
+    // Cannot insert any more
+    RID fail_rid;
+    EXPECT_FALSE(page.InsertTuple(Tuple(std::string(sz, 'F')), &fail_rid));
+
+    // Delete 3 tuples in the middle: slot 5, slot 10, slot 15
+    ASSERT_TRUE(page.ApplyDelete(rids[5]));
+    ASSERT_TRUE(page.ApplyDelete(rids[10]));
+    ASSERT_TRUE(page.ApplyDelete(rids[15]));
+
+    // Now reinsertion must succeed and reuse these exact slots
+    RID rein1, rein2, rein3;
+    std::string new_payload1 = "Replaced_5_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    std::string new_payload2 = "Replaced_10_YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY";
+    std::string new_payload3 = "Replaced_15_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+    new_payload1.resize(sz);
+    new_payload2.resize(sz);
+    new_payload3.resize(sz);
+
+    ASSERT_TRUE(page.InsertTuple(Tuple(new_payload1), &rein1));
+    EXPECT_EQ(rein1.GetSlotNum(), 5);
+
+    ASSERT_TRUE(page.InsertTuple(Tuple(new_payload2), &rein2));
+    EXPECT_EQ(rein2.GetSlotNum(), 10);
+
+    ASSERT_TRUE(page.InsertTuple(Tuple(new_payload3), &rein3));
+    EXPECT_EQ(rein3.GetSlotNum(), 15);
+
+    // Page count remains the same
+    EXPECT_EQ(page.GetNumTuples(), initial_count);
+
+    // Verify all records (reinserted + untouched)
+    Tuple t;
+    EXPECT_TRUE(page.GetTuple(rein1, &t));
+    EXPECT_EQ(t.AsStringView(), new_payload1);
+
+    EXPECT_TRUE(page.GetTuple(rein2, &t));
+    EXPECT_EQ(t.AsStringView(), new_payload2);
+
+    EXPECT_TRUE(page.GetTuple(rein3, &t));
+    EXPECT_EQ(t.AsStringView(), new_payload3);
+
+    // Untouched slot 0 and slot 4 are still intact
+    EXPECT_TRUE(page.GetTuple(rids[0], &t));
+    EXPECT_TRUE(page.GetTuple(rids[4], &t));
+}
+
+TEST_F(TablePageTest, RidStability_ExplicitDefragmentation) {
+    TablePage page;
+    page.Init(1);
+
+    // Insert 6 tuples of varying lengths
+    std::vector<std::string> contents = {
+        std::string(100, '0'), // Slot 0
+        std::string(200, '1'), // Slot 1 (to be deleted)
+        std::string(300, '2'), // Slot 2
+        std::string(150, '3'), // Slot 3 (to be deleted)
+        std::string(250, '4'), // Slot 4
+        std::string(350, '5')  // Slot 5
+    };
+
+    std::vector<RID> rids;
+    std::vector<uint32_t> orig_offsets;
+    for (size_t i = 0; i < contents.size(); ++i) {
+        RID r;
+        ASSERT_TRUE(page.InsertTuple(Tuple(contents[i]), &r));
+        rids.push_back(r);
+        orig_offsets.push_back(page.GetTupleOffset(r.GetSlotNum()));
+    }
+
+    // Delete intermediate slots 1 and 3
+    EXPECT_TRUE(page.MarkDelete(rids[1]));
+    EXPECT_TRUE(page.MarkDelete(rids[3]));
+
+    // Compact the page explicitly
+    page.Defragment();
+
+    // 1. Verify physical offsets CHANGED for tuples that shifted during compaction
+    // Slot 0 was allocated first at PAGE_SIZE - 100, so it remains at PAGE_SIZE - 100.
+    // Slots 2, 4, 5 shifted right to reclaim deleted slots 1 (200B) and 3 (150B).
+    EXPECT_EQ(page.GetTupleOffset(0), orig_offsets[0]);
+    EXPECT_NE(page.GetTupleOffset(2), orig_offsets[2]); // Data moved!
+    EXPECT_NE(page.GetTupleOffset(4), orig_offsets[4]); // Data moved!
+    EXPECT_NE(page.GetTupleOffset(5), orig_offsets[5]); // Data moved!
+
+    // 2. RID STABILITY: External RIDs must still point to their respective tuples!
+    Tuple t0, t2, t4, t5;
+    // Slot 0
+    EXPECT_TRUE(page.GetTuple(rids[0], &t0));
+    EXPECT_EQ(t0.AsStringView(), contents[0]);
+    EXPECT_EQ(t0.GetRid(), rids[0]);
+
+    // Slot 2: RID(1, 2) is stable despite physical offset change
+    EXPECT_TRUE(page.GetTuple(rids[2], &t2));
+    EXPECT_EQ(t2.AsStringView(), contents[2]);
+    EXPECT_EQ(t2.GetRid(), rids[2]);
+
+    // Slot 4: RID(1, 4) is stable
+    EXPECT_TRUE(page.GetTuple(rids[4], &t4));
+    EXPECT_EQ(t4.AsStringView(), contents[4]);
+    EXPECT_EQ(t4.GetRid(), rids[4]);
+
+    // Slot 5: RID(1, 5) is stable
+    EXPECT_TRUE(page.GetTuple(rids[5], &t5));
+    EXPECT_EQ(t5.AsStringView(), contents[5]);
+    EXPECT_EQ(t5.GetRid(), rids[5]);
+
+    // 3. Deleted slots cannot be retrieved
+    Tuple t_dead;
+    EXPECT_FALSE(page.GetTuple(rids[1], &t_dead));
+    EXPECT_FALSE(page.GetTuple(rids[3], &t_dead));
+
+    // 4. Iterator visits live slots in stable slot order: 0, 2, 4, 5
+    std::vector<RID> iterated_rids;
+    for (auto it = page.begin(); it != page.end(); ++it) {
+        iterated_rids.push_back(it.GetRid());
+    }
+    EXPECT_EQ(iterated_rids, (std::vector<RID>{rids[0], rids[2], rids[4], rids[5]}));
+}
+
+TEST_F(TablePageTest, RidStability_CompactionOnInsert) {
+    TablePage page;
+    page.Init(1);
+
+    // Insert 4 tuples of 900 bytes each
+    // Header (24) + Slots (32) + 3600 = 3656 bytes. Free = 440 bytes.
+    RID r0, r1, r2, r3;
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(900, '0')), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(900, '1')), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(900, '2')), &r2));
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(900, '3')), &r3));
+
+    uint32_t orig_offset2 = page.GetTupleOffset(2);
+    uint32_t orig_offset3 = page.GetTupleOffset(3);
+
+    // Mark delete r1 (900 bytes freed in the middle)
+    EXPECT_TRUE(page.MarkDelete(r1));
+
+    // Insert new 800-byte tuple. Contiguous free space (440) < 800, so auto-compaction triggers!
+    RID r_new;
+    std::string new_data(800, 'N');
+    ASSERT_TRUE(page.InsertTuple(Tuple(new_data), &r_new));
+
+    // Compaction shifted physical tuples
+    EXPECT_NE(page.GetTupleOffset(2), orig_offset2);
+    EXPECT_NE(page.GetTupleOffset(3), orig_offset3);
+
+    // Existing RIDs remain completely stable and retrieve original data
+    Tuple t0, t2, t3, t_new;
+    EXPECT_TRUE(page.GetTuple(r0, &t0));
+    EXPECT_EQ(t0.AsStringView(), std::string(900, '0'));
+    EXPECT_EQ(t0.GetRid(), r0);
+
+    EXPECT_TRUE(page.GetTuple(r2, &t2));
+    EXPECT_EQ(t2.AsStringView(), std::string(900, '2'));
+    EXPECT_EQ(t2.GetRid(), r2);
+
+    EXPECT_TRUE(page.GetTuple(r3, &t3));
+    EXPECT_EQ(t3.AsStringView(), std::string(900, '3'));
+    EXPECT_EQ(t3.GetRid(), r3);
+
+    // New tuple reused slot 1
+    EXPECT_EQ(r_new.GetSlotNum(), 1);
+    EXPECT_TRUE(page.GetTuple(r_new, &t_new));
+    EXPECT_EQ(t_new.AsStringView(), new_data);
+    EXPECT_EQ(t_new.GetRid(), r_new);
+}
+
+TEST_F(TablePageTest, RidStability_CompactionOnUpdate) {
+    TablePage page;
+    page.Init(1);
+
+    // Insert 3 tuples of 1000 bytes each
+    RID r0, r1, r2;
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(1000, 'A')), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(1000, 'B')), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(1000, 'C')), &r2));
+
+    uint32_t orig_offset2 = page.GetTupleOffset(2);
+
+    // Mark delete slot 1
+    EXPECT_TRUE(page.MarkDelete(r1));
+
+    // Update tuple 0 to grow from 1000 to 1800 bytes, forcing page compaction
+    std::string grown_data(1800, 'G');
+    Tuple old_t0;
+    ASSERT_TRUE(page.UpdateTuple(Tuple(grown_data), &old_t0, r0));
+    EXPECT_EQ(old_t0.AsStringView(), std::string(1000, 'A'));
+
+    // Physical offset of slot 2 changed
+    EXPECT_NE(page.GetTupleOffset(2), orig_offset2);
+
+    // RID 2 is stable and intact
+    Tuple t2;
+    EXPECT_TRUE(page.GetTuple(r2, &t2));
+    EXPECT_EQ(t2.AsStringView(), std::string(1000, 'C'));
+    EXPECT_EQ(t2.GetRid(), r2);
+
+    // RID 0 is stable and has updated data
+    Tuple t0;
+    EXPECT_TRUE(page.GetTuple(r0, &t0));
+    EXPECT_EQ(t0.AsStringView(), grown_data);
+    EXPECT_EQ(t0.GetRid(), r0);
+}
+
+
 
