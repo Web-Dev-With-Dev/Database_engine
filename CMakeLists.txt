@@ -281,6 +281,29 @@ else()
     message(WARNING "extendible_hash_table_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/extendible_hash_table_test.cpp")
 endif()
 
+# 10. End-to-End Storage Integration Test (DiskManager + LRUK + BPM + TablePage + TableHeap)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e_storage_test.cpp)
+    message(STATUS "Found e2e_storage_test.cpp")
+    add_executable(e2e_storage_test
+        tests/e2e_storage_test.cpp
+    )
+    
+    target_link_libraries(e2e_storage_test PRIVATE
+        db_common
+        GTest::gtest_main
+    )
+    
+    target_include_directories(e2e_storage_test PRIVATE
+        include
+    )
+    
+    gtest_discover_tests(e2e_storage_test
+        DISCOVERY_MODE PRE_TEST
+    )
+else()
+    message(WARNING "e2e_storage_test.cpp not found at ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e_storage_test.cpp")
+endif()
+
 # ==================== Test Runner Targets ====================
 
 # Run LRU-K tests specifically
@@ -327,6 +350,9 @@ add_custom_target(run_all_tests
     COMMAND ${CMAKE_COMMAND} -E echo "9. Running Extendible Hash Table Tests..."
     COMMAND ./extendible_hash_table_test || echo "Extendible Hash Table tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "10. Running End-to-End Storage Integration Tests..."
+    COMMAND ./e2e_storage_test || echo "E2E Storage tests completed"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
     COMMAND ${CMAKE_COMMAND} -E echo "All tests completed"
     COMMAND ${CMAKE_COMMAND} -E echo "========================================"
@@ -340,6 +366,7 @@ add_custom_target(run_all_tests
         rid_test
         table_heap_test
         extendible_hash_table_test
+        e2e_storage_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running all tests"
 )
