@@ -1,204 +1,158 @@
 # Database Engine
 
-A database storage engine built from scratch in C++20, implementing the core layers that underpin real database systems like PostgreSQL and MySQL — disk I/O, in-memory page management, and a buffer pool eviction policy.
+A disk-oriented relational database storage engine built from scratch in C++20, implementing the fundamental layers that underpin industrial database management systems like PostgreSQL, SQLite, and MySQL — persistent disk I/O, in-memory buffer pool management with scan-resistant LRU-K eviction, slotted-page storage with dual-ended growth, compaction with RID stability, and multi-page table heaps with cross-page update migration.
 
-> **Goal**: understand how a database engine works at the storage layer by building each component from the ground up, one layer at a time.
-
----
-
-## Architecture
-
-The engine is built as a layered stack. Each layer depends only on the one below it.
-
-```
-┌─────────────────────────────────────────┐
-│          Application / Query Layer       │  (future)
-├─────────────────────────────────────────┤
-│         Buffer Pool Manager             │  (future — Day 8+)
-│  - Brings pages into memory on demand   │
-│  - Coordinates Page + LRU-K Replacer    │
-├──────────────────┬──────────────────────┤
-│   LRU-K Replacer │       Page           │
-│  - Eviction policy│  - In-memory frame  │
-│  - cold/hot queues│  - R/W latch        │
-│  - O(1) evict     │  - Pin counter      │
-├──────────────────┴──────────────────────┤
-│             Disk Manager                │
-│  - Page-addressed file I/O              │
-│  - Zero-fill sparse writes              │
-│  - File integrity validation            │
-├─────────────────────────────────────────┤
-│          OS File System / Disk          │
-└─────────────────────────────────────────┘
-```
+> **Goal**: Build a complete, production-grade database storage engine from the ground up, layer by layer, with zero shortcuts.
 
 ---
 
-## Components
+## Architecture Overview
 
-### `DiskManager` — [`include/disk_manager.h`](include/disk_manager.h) · [`src/disk_manager.cpp`](src/disk_manager.cpp)
-
-Provides page-addressed persistent storage. All I/O is done in fixed-size pages (`PAGE_SIZE = 4096` bytes), matching the OS virtual memory page size for maximum efficiency.
-
-**Key design decisions:**
-
-| Decision | Rationale |
-|---|---|
-| Fixed `PAGE_SIZE = 4096` | Matches OS page size; avoids partial-page I/O at the kernel boundary |
-| `AllocatePage()` returns a monotonically increasing `page_id_t` | Simple, no fragmentation tracking needed at this stage |
-| Sparse write via zero-fill loop | Writing page N allocates pages 0..N-1 as zeroed pages; consistent with POSIX file semantics |
-| Constructor validates `file_size % PAGE_SIZE == 0` | Detects truncated / corrupted files at open time, before any I/O |
-| Per-instance `std::mutex` on `db_file_` | Protects the `std::fstream` state from concurrent calls within the same instance; separate instances each own their file handle |
-| Flush after every write | Ensures durability at the storage layer; upper layers can choose to batch writes when the Buffer Pool Manager is added |
-
-**File format:**
-```
-Byte offset:   0           4096        8192        12288
-               ┌───────────┬───────────┬───────────┬───────────
-               │  Page 0   │  Page 1   │  Page 2   │  Page 3  ...
-               │ 4096 bytes│ 4096 bytes│ 4096 bytes│ 4096 bytes
-               └───────────┴───────────┴───────────┴───────────
-```
-Page ID is a direct index: `offset = page_id * PAGE_SIZE`. No header, no free-list — that belongs in a higher layer.
-
----
-
-### `Page` — [`include/page.h`](include/page.h) · [`src/page.cpp`](src/page.cpp)
-
-An in-memory frame that holds one 4 KB page of data. Pages live inside a buffer pool (future); they are fetched from disk, modified, and eventually written back.
-
-**Key design decisions:**
-
-| Decision | Rationale |
-|---|---|
-| `std::array<char, PAGE_SIZE>` for data | Stack-allocated, contiguous, zero-overhead over raw array; zero-initialized in constructor |
-| `std::shared_mutex` for the latch | Allows multiple concurrent readers (read latch) with exclusive writers (write latch), matching real DBMS concurrency |
-| `pin_count` (int, saturates at 0) | Tracks how many threads currently hold a reference; only evictable when `pin_count == 0` |
-| `is_dirty` flag | Avoids writing clean pages back to disk; set to `true` on any modification |
-| `page_id_ = -1` default | Sentinel for "not assigned to any page" — distinguishable from valid page 0 |
-
----
-
-### `LRU-K Replacer` — [`include/lru_k_replacer.h`](include/lru_k_replacer.h) · [`src/lru_k_replacer.cpp`](src/lru_k_replacer.cpp)
-
-Implements the **LRU-K eviction policy** — a generalization of LRU that uses the *k-th most recent access time* as the eviction key. Designed to be plugged into a Buffer Pool Manager to decide which frame to evict when the pool is full.
-
-**Why LRU-K instead of plain LRU?**
-
-Plain LRU suffers from sequential scan pollution: a full table scan evicts hot pages because every scanned page displaces something with just one access. LRU-K requires `k` accesses before a page is considered "warm", dramatically reducing scan interference.
-
-**Algorithm overview:**
+The engine follows a strict multi-tier modular architecture where each layer abstracts the complexity of the layers beneath it:
 
 ```
-Frame state machine:
-                        RecordAccess (access_count < k)
-  ┌───────┐ ─────────────────────────────────────────► ┌───────────┐
-  │  NEW  │                                             │  COLD     │
-  │       │ ◄─────────────────────────────────────────  │ (cold     │
-  └───────┘         Evict() or Reset()                  │  queue)   │
-                                                         └─────┬─────┘
-                                                               │ RecordAccess
-                                                               │ (access_count == k)
-                                                         ┌─────▼─────┐
-                                                         │   HOT     │
-                                                         │ (hot      │
-                                                         │  queue)   │
-                                                         └───────────┘
-```
-
-**Two-queue data structure:**
-
-```
-cold_queue_ (std::list)            hot_queue_ (std::list)
-  ┌────┬────┬────┬────┐              ┌────┬────┬────┐
-  │ F1 │ F3 │ F4 │ F5 │  evict ◄─── │ F0 │ F2 │ F6 │  ◄─── evict only if cold is empty
-  └────┴────┴────┴────┘              └────┴────┴────┘
-  (FIFO order — oldest first)       (sorted by k-th access time, oldest first)
-
-position_in_cold_ / position_in_hot_ (std::unordered_map<int, iterator>)
-  → O(1) removal from either list by frame_id
-```
-
-**Key design decisions:**
-
-| Decision | Rationale |
-|---|---|
-| Cold queue: FIFO (`std::list`, push_back/pop_front) | Frames with < k accesses have no reliable backward distance; FIFO is the correct LRU-K treatment |
-| Hot queue: sorted by k-th access timestamp | Evicts the frame whose k-th most recent access is oldest — the true LRU-K criterion |
-| Iterator map for O(1) removal | `std::list::erase(iterator)` is O(1); the map trades memory for speed |
-| `SetEvictable(true)` clears `is_pinned` | `SetEvictable` is the authoritative API for the Buffer Pool Manager; it overrides any prior `Pin()` state |
-| `Evict()` resets frame to "new" state | Frame returns to the pool clean; access history is cleared so it restarts its LRU-K lifecycle |
-| `k` is configurable at construction | Supports LRU-1 (plain LRU), LRU-2 (most common real-world choice), and higher k values |
-
-**Complexity:**
-
-| Operation | Average | Worst Case | Notes |
-|---|---|---|---|
-| `RecordAccess` | O(1) | O(n) | O(n) only when repositioning in hot queue |
-| `AddToQueue` (cold) | O(1) | O(1) | Always appends to back |
-| `AddToQueue` (hot) | O(n/2) | O(n) | Linear scan to find sorted insert position |
-| `RemoveFromQueue` | O(1) | O(1) | Iterator lookup + list erase |
-| `Evict` | O(1) | O(1) | Always pops from front |
-| `Pin` / `Unpin` | O(1) | O(1) | |
-| `GetEvictableCount` | O(1) | O(1) | Sum of two queue sizes |
-
-> The hot queue O(n) insert is the only non-O(1) operation. In practice, with typical buffer pool sizes (256–1024 frames), this is fast enough. A priority queue or skip list could bring this to O(log n) if needed.
-
----
-
-## Build
-
-### Requirements
-- CMake ≥ 3.20
-- C++20 compiler (GCC 10+ / Clang 12+ / MSVC 2022)
-- Google Test (installed via system package or `vcpkg`)
-
-### MSYS2 / MinGW (Windows)
-```bash
-pacman -S mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gtest
-```
-
-### Build steps
-```bash
-mkdir build && cd build
-cmake .. -G Ninja
-cmake --build .
-```
-
-### Run the demo
-```bash
-./database.exe                        # uses ../Data/database.db
-./database.exe /path/to/custom.db     # custom file
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Layer 5: Table Heap & Cross-Page Management                                 │
+│  - TableHeap: Doubly-linked chain of TablePages                             │
+│  - Multi-Page Spanning Inserts                                              │
+│  - Cross-Page Migration on Update (Delete Old + Insert New)                 │
+│  - TableIterator: Multi-page scan skipping deleted/tombstoned slots         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Layer 4: Records, Identifiers, & Slotted Pages                              │
+│  - TablePage: Slotted-page layout on top of 4096-byte Page                  │
+│  - Dual-End Growth: Slot array (forward), Tuple data (backward)             │
+│  - Indirection Vector: RID (page_id, slot_num) with offset stability        │
+│  - Compaction / Defragmentation: Hole consolidation & space reclamation     │
+│  - TablePageIterator: Page-level forward iterator (std::forward_iterator)   │
+│  - Tuple: Variable-length payload abstraction                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Layer 3: Buffer Pool Management & Caching                                   │
+│  - BufferPoolManager: Manages fixed pool of in-memory frames                │
+│  - Page Table: Hash map mapping page_id → frame_id                          │
+│  - Pin / Unpin concurrency protocol with dirty-page writeback tracking      │
+├──────────────────────────────────────┬──────────────────────────────────────┤
+│ Layer 2A: Replacement Policy         │ Layer 2B: In-Memory Frame            │
+│  - LRUKReplacer: LRU-K algorithm     │  - Page: 4096-byte data frame        │
+│  - Cold queue (FIFO) for k < K       │  - std::shared_mutex R/W latch       │
+│  - Hot queue (k-th access timestamp) │  - Atomic pin counter & dirty flag   │
+│  - Scan resistance                   │  - Zero-copy cast to TablePage       │
+├──────────────────────────────────────┴──────────────────────────────────────┤
+│ Layer 1: Persistent Disk Storage                                            │
+│  - DiskManager: Page-addressed file I/O (PAGE_SIZE = 4096 bytes)            │
+│  - Monotonic page allocation, zero-fill sparse writes, thread-safe access   │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Tests
+## Core Components
 
-```bash
-cd build
-ctest --output-on-failure       # run all tests
+### 1. `TableHeap` & `TableIterator`
+**Headers:** [`include/table_heap.h`](include/table_heap.h) · **Source:** [`src/table_heap.cpp`](src/table_heap.cpp)
+
+Represents a physical relational table stored as a doubly-linked list of `TablePage`s inside the `BufferPoolManager`.
+
+```
+Page 0 (TablePage)               Page 1 (TablePage)               Page 2 (TablePage)
+┌──────────────────────┐         ┌──────────────────────┐         ┌──────────────────────┐
+│ Prev: -1  | Next: 1  │ ◄─────► │ Prev: 0   | Next: 2  │ ◄─────► │ Prev: 1   | Next: -1 │
+│ [Slot 0] [Slot 1]... │         │ [Slot 0] [Slot 1]... │         │ [Slot 0] [Slot 1]... │
+└──────────────────────┘         └──────────────────────┘         └──────────────────────┘
 ```
 
-Or run individual test suites:
-```bash
-./lru_k_replacer_test.exe       # 14 unit tests + 1 benchmark
-./page_test.exe                 # 28 unit tests
-./disk_manager_test.exe         # 42 unit tests + benchmarks
-./integration_test.exe          # 15 integration tests (BufferPool simulation)
+- **Multi-Page Inserts**: Sequentially checks pages for free space. If all pages in the chain are full, allocates and initializes a new page via `BufferPoolManager::NewPage` and links it into the chain.
+- **Cross-Page Migration on Update (Delete Old + Insert New)**:
+  - If a tuple update fits on the current page (in-place or via defragmentation), updates it locally with **zero RID change**.
+  - If the updated tuple cannot fit on the current page even after compaction, executes **Strategy 3**:
+    1. Soft-deletes the old tuple on the current page (`table_page->MarkDelete(old_rid)`).
+    2. Inserts the updated tuple on an existing or newly allocated page in the heap.
+    3. Returns the `new_rid` to update any secondary indexes.
+    4. If the insertion fails, automatically rolls back the delete on the old page to preserve atomicity.
+- **`TableIterator`**: Implements `std::forward_iterator` over the entire table heap. Seamlessly advances across page boundaries, fetches/unpins buffer pool frames, and skips all deleted/empty slots.
+
+---
+
+### 2. `TablePage` & `TablePageIterator`
+**Headers:** [`include/table_page.h`](include/table_page.h) · **Source:** [`src/table_page.cpp`](src/table_page.cpp)
+
+Implements the **Slotted-Page Architecture** on top of the 4096-byte raw `Page`.
+
+```
+Offset 0                                                              Offset 4096
+┌─────────────────┬──────────────────┬──────────────┬──────────────┬─────────────┐
+│ Page Header     │ Slot Directory   │ Free Space   │ Tuple 1 Data │ Tuple 0 Data│
+│ (24 bytes)      │ [S0][S1][S2]...  │ (Contiguous) │ (Variable)   │ (Variable)  │
+└─────────────────┴──────────────────┴──────────────┴──────────────┴─────────────┘
+▲                 ▲                  ▲              ▲                            ▲
+0                 24                 Lower (pd)     Upper (free_ptr)             4096
+                                  (grows ──►)       (◄── grows)
 ```
 
-### Test coverage summary
+- **Dual-End Growth Model**:
+  - **Slot Directory**: Grows **forward** from byte 24 toward 4096. Each slot is 8 bytes (`uint32_t offset` + `uint32_t size`).
+  - **Tuple Data**: Grows **backward** from byte 4096 toward 24.
+  - **Unified Free Space**: A single dynamic pool in the middle (`free_ptr - slot_end`).
+- **Tombstones & Deletion**:
+  - `MarkDelete(rid)`: Fast soft delete setting the high-order tombstone bit (`1u << 31`) on slot size. Reversible via `RollbackDelete(rid)`.
+  - `ApplyDelete(rid)`: Physically zeroes slot offset and size, enabling immediate slot index reuse without growing the slot directory.
+- **Compaction & Defragmentation (`Defragment()`)**:
+  - Eliminates dead space holes created by deletions and tuple updates.
+  - Shifts all live tuples tightly toward byte 4096 and reclaims trailing dead slots.
+  - **Guarantees RID Stability**: Shifts physical memory offsets while preserving identical slot indices.
+- **`TablePageIterator`**:
+  - Single-page forward iterator satisfying C++20 `std::forward_iterator`.
+  - Automatically skips tombstoned, zeroed, and deleted slots.
+  - Supports range-based for loops: `for (const auto &tuple : page)`.
 
-| Suite | Tests | What's covered |
-|---|---|---|
-| `LRUKReplacerTest` | 13 | Construction, access recording, eviction ordering (k=2, k=3), pin/unpin, edge cases, OOB access, 1000-iteration stress |
-| `LRUKReplacerBenchmark` | 1 | 100 000-op throughput (50M ops/sec target) |
-| `PageTest` | 28 | Constructor, page ID, dirty flag, pin/unpin, latches, full-page I/O, binary data, isolation, stress |
-| `DiskManagerTest` | 40 + 2 bench | Write/read, persistence, sparse writes, zero-fill, corruption detection, concurrent I/O, extreme stress |
-| `BufferPoolIntegrationTest` | 15 | End-to-end BPM simulation with LRU-K, eviction priority, hot/cold workload, sequential scan, DB workload |
+---
 
-**Current status: 99/99 tests passing.**
+### 3. Record Identifiers (`RID`) & `Tuple`
+**Headers:** [`include/rid.h`](include/rid.h) · [`include/tuple.h`](include/tuple.h)
+
+- **`RID` (Record Identifier)**: The logical address of any record in the database:
+  $$\text{RID} = (\text{page\_id}, \text{slot\_num})$$
+  - Packed into a 64-bit integer (`uint64_t`) for fast comparisons and hashing.
+  - Provides physical indirection: external indexes store RIDs, never physical byte offsets.
+- **`Tuple`**:
+  - Represents variable-length record data backed by `std::vector<char>`.
+  - Provides zero-copy `std::string_view` and `std::span<const char>` inspection methods.
+
+---
+
+### 4. `BufferPoolManager`
+**Headers:** [`include/buffer_pool_manager.h`](include/buffer_pool_manager.h) · **Source:** [`src/buffer_pool_manager.cpp`](src/buffer_pool_manager.cpp)
+
+Maintains an in-memory cache of disk pages to minimize slow storage I/O.
+
+- **Page Table**: `std::unordered_map<page_id_t, frame_id_t>` for $O(1)$ page lookups.
+- **`FetchPage(page_id)`**: Hits in-memory cache or transparently fetches from disk into a free frame (or evicts an unpinned frame).
+- **Pin / Unpin Protocol**: Pages with `pin_count > 0` are pinned and cannot be evicted by other concurrent threads.
+- **Dirty Tracking**: Dirty pages modified in memory are automatically flushed back to disk upon eviction or explicit flush.
+- **`NewPage(&page_id)`**: Allocates a new page ID from `DiskManager` and pins a frame for immediate writing.
+
+---
+
+### 5. `LRUKReplacer`
+**Headers:** [`include/lru_k_replacer.h`](include/lru_k_replacer.h) · **Source:** [`src/lru_k_replacer.cpp`](src/lru_k_replacer.cpp)
+
+Implements the scan-resistant **LRU-K cache eviction policy** (default $K=2$).
+
+- **Cold Queue (History Queue)**: Frames accessed fewer than $K$ times (evicted in FIFO order).
+- **Hot Queue (Cache Queue)**: Frames accessed $\ge K$ times (evicted by earliest $K$-th backward access timestamp).
+- **Scan Resistance**: Prevents single-pass sequential table scans from flushing hot index/data pages out of the buffer pool.
+
+---
+
+### 6. `Page` & `DiskManager`
+**Headers:** [`include/page.h`](include/page.h) · [`include/disk_manager.h`](include/disk_manager.h) · **Source:** [`src/page.cpp`](src/page.cpp) · [`src/disk_manager.cpp`](src/disk_manager.cpp)
+
+- **`Page`**:
+  - A fixed 4096-byte memory frame.
+  - Contains atomic pin counters, atomic dirty flags, and a `std::shared_mutex` for concurrent reader/writer latching.
+  - Standard layout: `sizeof(TablePage) == sizeof(Page) == 4096` enables zero-copy `TablePage::Cast()`.
+- **`DiskManager`**:
+  - Performs direct 4096-byte block file I/O on the underlying database file.
+  - Zero-fills sparse page allocations and validates file boundaries (`file_size % 4096 == 0`).
 
 ---
 
@@ -207,62 +161,101 @@ Or run individual test suites:
 ```
 database-engine/
 ├── include/
-│   ├── config.h              # Global constants: PAGE_SIZE, page_id_t, INVALID_PAGE_ID
-│   ├── disk_manager.h        # DiskManager interface
-│   ├── page.h                # Page (in-memory frame) interface
-│   └── lru_k_replacer.h      # LRU-K Replacer interface
+│   ├── config.h                 # Global constants: PAGE_SIZE (4096), page_id_t, frame_id_t
+│   ├── disk_manager.h           # DiskManager interface
+│   ├── page.h                   # Page (4 KB frame, latches, pin count)
+│   ├── lru_k_replacer.h         # LRU-K cache eviction replacer
+│   ├── buffer_pool_manager.h    # BufferPoolManager interface
+│   ├── rid.h                    # Record ID (page_id + slot_num)
+│   ├── tuple.h                  # Tuple record container
+│   ├── table_page.h             # Slotted-page layout and TablePageIterator
+│   └── table_heap.h             # Multi-page TableHeap and TableIterator
 ├── src/
-│   ├── main.cpp              # CLI demo
-│   ├── disk_manager.cpp      # DiskManager implementation
-│   ├── page.cpp              # Page implementation
-│   └── lru_k_replacer.cpp    # LRU-K Replacer implementation
+│   ├── main.cpp                 # Demo executable
+│   ├── disk_manager.cpp         # DiskManager implementation
+│   ├── page.cpp                 # Page implementation
+│   ├── lru_k_replacer.cpp       # LRU-K Replacer implementation
+│   ├── buffer_pool_manager.cpp  # BufferPoolManager implementation
+│   ├── table_page.cpp           # TablePage & TablePageIterator implementation
+│   └── table_heap.cpp           # TableHeap & TableIterator implementation
 ├── tests/
-│   ├── lru_k_replacer_test.cpp
-│   ├── page_test.cpp
-│   ├── disk_manager_test.cpp
-│   └── integration_test.cpp
+│   ├── disk_manager_test.cpp        # 42 DiskManager tests + benchmarks
+│   ├── page_test.cpp                # 28 Page latching & pin tests
+│   ├── lru_k_replacer_test.cpp      # 14 LRU-K unit tests + benchmark
+│   ├── buffer_pool_manager_test.cpp # 13 BufferPoolManager tests
+│   ├── integration_test.cpp         # 15 BufferPool integration workload tests
+│   ├── rid_test.cpp                 # 9 RID packing, hashing, & comparison tests
+│   ├── table_page_test.cpp          # 41 Slotted page, iterator, defrag, & stability tests
+│   └── table_heap_test.cpp          # 9 Multi-page TableHeap & cross-page migration tests
 ├── docs/
-│   ├── disk_manager_design.md   # DiskManager deep-dive
-│   └── lru_k_design.md          # LRU-K algorithm deep-dive
-├── Data/
-│   └── database.db           # Runtime database file (gitignored)
+│   ├── disk_manager_design.md   # Disk storage architecture deep-dive
+│   ├── lru_k_design.md          # LRU-K cache algorithm deep-dive
+│   └── slotted_page_design.md   # Slotted page architecture & Postgres/SQLite comparison
 ├── CMakeLists.txt
 └── README.md
 ```
 
 ---
 
-## Progress Log
+## Build & Test
 
-| Day | Topic | Status |
+### Requirements
+- CMake ≥ 3.20
+- C++20 compiler (GCC 10+ / Clang 12+ / MSVC 2022)
+- Ninja or Make
+- Google Test
+
+### Build Steps
+
+```bash
+# Configure with Ninja and C++20
+cmake -B build -G Ninja
+
+# Compile library, demo, and all test suites
+cmake --build build
+```
+
+### Run All Unit & Integration Tests
+
+```bash
+# Run full test suite via CTest (171 tests)
+ctest --test-dir build --output-on-failure
+```
+
+Or run individual component test executables:
+```bash
+./build/disk_manager_test.exe         # Disk I/O & corruption detection
+./build/page_test.exe                 # Page frames & latch concurrency
+./build/lru_k_replacer_test.exe       # LRU-K replacement policy
+./build/buffer_pool_manager_test.exe  # Buffer pool caching & evictions
+./build/integration_test.exe          # Complex database access simulations
+./build/rid_test.exe                  # RID bit-packing & hashing
+./build/table_page_test.exe           # Slotted pages, compactions, & iterators
+./build/table_heap_test.exe           # Multi-page TableHeap & migration updates
+```
+
+---
+
+## Test Coverage Summary
+
+**Current Status: 171 / 171 tests passing (100% pass rate).**
+
+| Test Suite | Tests | Features Covered |
 |---|---|---|
-| 1 | Project setup, CMake, DiskManager skeleton | ✅ |
-| 2 | DiskManager: WritePage, ReadPage, AllocatePage | ✅ |
-| 3 | DiskManager tests (42 tests) | ✅ |
-| 4 | Page class: data buffer, pin count, latches | ✅ |
-| 5 | LRU-K Replacer: cold/hot queue design | ✅ |
-| 6 | LRU-K tests, integration tests, bug fixes | ✅ |
-| 7 | Catch-up: dedup headers, refactor mutex, add README | ✅ |
-| 8+ | **Buffer Pool Manager** (next) | 🔜 |
+| `DiskManagerTest` | 42 | Page-addressed read/write, zero-fill sparse allocation, persistence, corruption validation, concurrent stress |
+| `PageTest` | 28 | Frame data integrity, pin/unpin saturating counters, dirty flags, shared/exclusive latches, stress tests |
+| `LRUKReplacerTest` | 14 | Cold/hot queue transitions, $K$-distance eviction order ($K=2, 3$), pin overrides, empty queues, 100k-op benchmark |
+| `BufferPoolManagerTest` | 13 | Page table hits/misses, frame allocation, dirty-page writeback, eviction correctness, concurrent thread safety |
+| `BufferPoolIntegrationTest` | 15 | Mixed database workloads, repeated access patterns, sequential scans, frame-to-page mappings |
+| `RIDTest` | 9 | 64-bit int packing, equality, ordering, stream formatting, `std::hash` in `std::unordered_map` |
+| `TablePageTest` | 41 | Dual-end growth, variable-length inserts, in-place updates, tombstones, defragmentation, `TablePageIterator`, insert-until-full, delete + reinsert, RID stability |
+| `TableHeapTest` | 9 | Linked-page creation, multi-page spanning inserts, cross-page migration update (Delete Old + Insert New), `TableIterator` across pages, crash-restart persistence |
 
 ---
 
-## What's Next — Buffer Pool Manager
+## References & Theoretical Foundations
 
-The Buffer Pool Manager (BPM) sits between the disk and the query engine. It:
-
-1. Maintains a fixed-size pool of `Page` frames in memory
-2. Uses `DiskManager` to fetch pages from disk on cache miss
-3. Uses `LRU-K Replacer` to choose which frame to evict when the pool is full
-4. Tracks dirty pages and writes them back before eviction
-5. Exposes `FetchPage(page_id)` and `UnpinPage(page_id, is_dirty)` to callers
-
-The integration test already has a `BufferPoolManagerSimulator` that validates the LRU-K + Page interaction — the real BPM will replace it.
-
----
-
-## References
-
-- [CMU 15-445/645 Database Systems](https://15445.courses.cs.cmu.edu/) — course this project is inspired by
-- [The LRU-K Page Replacement Algorithm (O'Neil et al., 1993)](https://dl.acm.org/doi/10.1145/170036.170081) — original paper
-- [PostgreSQL Buffer Manager](https://www.postgresql.org/docs/current/storage-page-layout.html) — production reference
+- [CMU 15-445/645 Database Systems](https://15445.courses.cs.cmu.edu/) — Storage engine & buffer pool architecture
+- [The LRU-K Page Replacement Algorithm (O'Neil et al., 1993)](https://dl.acm.org/doi/10.1145/170036.170081) — Foundation of the replacer
+- [PostgreSQL Storage Page Layout](https://www.postgresql.org/docs/current/storage-page-layout.html) — Slotted page format & line pointers
+- [SQLite Database File Format](https://www.sqlite.org/fileformat.html) — Slotted cell pointers, freeblocks, and fragmentation
