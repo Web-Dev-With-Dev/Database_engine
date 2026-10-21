@@ -2,11 +2,65 @@
 
 #include <cstdint>
 #include <cstring>
+#include <iterator>
+#include <optional>
 #include <span>
 #include "config.h"
 #include "page.h"
 #include "rid.h"
 #include "tuple.h"
+
+class TablePage;
+
+/**
+ * @brief Forward iterator for traversing live tuples in a TablePage.
+ * Automatically skips deleted, empty, and tombstoned slots.
+ */
+class TablePageIterator {
+private:
+    const TablePage *page_{nullptr};
+    uint32_t slot_id_{0};
+    Tuple current_tuple_{};
+
+    void AdvanceToNextLiveSlot();
+
+public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = Tuple;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const Tuple *;
+    using reference = const Tuple &;
+
+    TablePageIterator() = default;
+    explicit TablePageIterator(const TablePage *page, uint32_t slot_id = 0);
+    TablePageIterator(const TablePage *page, const RID &rid);
+
+    reference operator*() const { return current_tuple_; }
+    pointer operator->() const { return &current_tuple_; }
+
+    TablePageIterator &operator++();
+    TablePageIterator operator++(int);
+
+    bool operator==(const TablePageIterator &other) const;
+    bool operator!=(const TablePageIterator &other) const { return !(*this == other); }
+
+    Tuple GetTuple() const { return current_tuple_; }
+    bool GetTuple(Tuple *tuple) const;
+    const Tuple &GetTupleRef() const { return current_tuple_; }
+
+    RID GetRid() const;
+    uint32_t GetSlotNum() const { return slot_id_; }
+    page_id_t GetPageId() const;
+    const TablePage *GetPage() const { return page_; }
+
+    bool IsEnd() const;
+    bool HasNext() const { return !IsEnd(); }
+    bool IsValid() const { return !IsEnd(); }
+    explicit operator bool() const { return !IsEnd(); }
+
+    bool Next(Tuple *tuple = nullptr, RID *rid = nullptr);
+    void Refresh();
+};
 
 /**
  * @brief Slot structure in the slot directory.
@@ -52,6 +106,11 @@ public:
     static constexpr size_t SIZEOF_TUPLE_SLOT = 8;
 
     static constexpr uint32_t DELETE_MASK = 1u << 31;
+
+    // Type aliases for iteration
+    using Iterator = TablePageIterator;
+    using const_iterator = TablePageIterator;
+    using iterator = TablePageIterator;
 
     TablePage() = default;
 
@@ -108,6 +167,9 @@ public:
     bool InsertTuple(std::span<const char> tuple_bytes, RID *rid);
 
     bool GetTuple(const RID &rid, Tuple *tuple) const;
+    bool GetTuple(uint32_t slot_id, Tuple *tuple) const;
+    std::optional<Tuple> GetTuple(const RID &rid) const;
+    std::optional<Tuple> GetTuple(uint32_t slot_id) const;
 
     bool UpdateTuple(const Tuple &new_tuple, Tuple *old_tuple, const RID &rid);
     bool UpdateTuple(const Tuple &new_tuple, const RID &rid);
@@ -119,6 +181,22 @@ public:
     // Iteration helpers
     bool GetFirstTupleRid(RID *first_rid) const;
     bool GetNextTupleRid(const RID &cur_rid, RID *next_rid) const;
+
+    // Page-level Tuple Iterator methods
+    Iterator begin();
+    Iterator end();
+    Iterator begin() const;
+    Iterator end() const;
+    Iterator cbegin() const;
+    Iterator cend() const;
+
+    Iterator Begin();
+    Iterator End();
+    Iterator Begin() const;
+    Iterator End() const;
+    Iterator Begin(uint32_t start_slot) const;
+    Iterator Begin(const RID &start_rid) const;
+    Iterator GetIterator() const;
 
     // Compaction / Defragmentation
     void Defragment();
@@ -141,6 +219,9 @@ public:
     static uint32_t GetTupleSize(const char *data, uint32_t slot_id);
     static void SetTupleSize(char *data, uint32_t slot_id, uint32_t size);
     static bool IsTupleDeleted(const char *data, uint32_t slot_id);
+
+    static bool GetTuple(const char *data, page_id_t page_id, uint32_t slot_id, Tuple *tuple);
+    static bool GetTuple(const char *data, const RID &rid, Tuple *tuple);
 };
 
 // Ensure TablePage adds no non-static members so reinterpret_cast from Page* is standard-layout compatible

@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstring>
+#include <filesystem>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
-#include <filesystem>
 
 #include "buffer_pool_manager.h"
 #include "disk_manager.h"
@@ -573,4 +576,472 @@ TEST_F(TablePageTest, MultipleCompactionCycles) {
         EXPECT_TRUE(page.MarkDelete(rC));
     }
 }
+
+// ============================================================================
+// Page-level Tuple Iterator & GetTuple Unit Tests
+// ============================================================================
+
+TEST_F(TablePageTest, IteratorEmptyPage) {
+    TablePage page;
+    page.Init(10);
+
+    EXPECT_EQ(page.begin(), page.end());
+    EXPECT_EQ(page.cbegin(), page.cend());
+    EXPECT_EQ(page.Begin(), page.End());
+
+    auto it = page.begin();
+    EXPECT_TRUE(it.IsEnd());
+    EXPECT_FALSE(it.HasNext());
+    EXPECT_FALSE(it.IsValid());
+    EXPECT_FALSE(static_cast<bool>(it));
+
+    Tuple tuple;
+    EXPECT_FALSE(it.GetTuple(&tuple));
+    RID rid;
+    EXPECT_FALSE(it.Next(&tuple, &rid));
+
+    int count = 0;
+    for (const auto &t : page) {
+        (void)t;
+        count++;
+    }
+    EXPECT_EQ(count, 0);
+}
+
+TEST_F(TablePageTest, IteratorSingleLiveTuple) {
+    TablePage page;
+    page.Init(1);
+
+    RID rid;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Only tuple"), &rid));
+
+    auto it = page.begin();
+    ASSERT_NE(it, page.end());
+    EXPECT_FALSE(it.IsEnd());
+    EXPECT_TRUE(it.HasNext());
+    EXPECT_TRUE(static_cast<bool>(it));
+
+    EXPECT_EQ(it.GetSlotNum(), 0);
+    EXPECT_EQ(it.GetRid(), rid);
+    EXPECT_EQ(it.GetPageId(), 1);
+    EXPECT_EQ(it->AsStringView(), "Only tuple");
+    EXPECT_EQ((*it).AsStringView(), "Only tuple");
+    EXPECT_EQ(it.GetTuple().AsStringView(), "Only tuple");
+
+    Tuple out_t;
+    EXPECT_TRUE(it.GetTuple(&out_t));
+    EXPECT_EQ(out_t.AsStringView(), "Only tuple");
+
+    // Advance
+    ++it;
+    EXPECT_EQ(it, page.end());
+    EXPECT_TRUE(it.IsEnd());
+    EXPECT_FALSE(it.HasNext());
+
+    // Calling ++ on end iterator is safe and remains at end
+    ++it;
+    EXPECT_EQ(it, page.end());
+}
+
+TEST_F(TablePageTest, IteratorMultipleLiveTuples) {
+    TablePage page;
+    page.Init(7);
+
+    std::vector<std::string> payloads = {
+        "First item",
+        "Second item - medium length text",
+        "Third item",
+        "Fourth item - longer content with numbers 1234567890",
+        "Fifth item"
+    };
+
+    std::vector<RID> rids;
+    for (const auto &p : payloads) {
+        RID r;
+        ASSERT_TRUE(page.InsertTuple(Tuple(p), &r));
+        rids.push_back(r);
+    }
+
+    // Iterate using standard range-for
+    std::vector<std::string> collected;
+    for (const auto &tuple : page) {
+        collected.emplace_back(tuple.AsStringView());
+    }
+    EXPECT_EQ(collected, payloads);
+
+    // Iterate using STL vector constructor from iterator range
+    std::vector<Tuple> tuple_vec(page.begin(), page.end());
+    ASSERT_EQ(tuple_vec.size(), payloads.size());
+    for (size_t i = 0; i < payloads.size(); ++i) {
+        EXPECT_EQ(tuple_vec[i].AsStringView(), payloads[i]);
+        EXPECT_EQ(tuple_vec[i].GetRid(), rids[i]);
+    }
+
+    // Verify slot indices
+    size_t idx = 0;
+    for (auto it = page.Begin(); it != page.End(); ++it, ++idx) {
+        EXPECT_EQ(it.GetSlotNum(), idx);
+        EXPECT_EQ(it.GetRid(), rids[idx]);
+    }
+}
+
+TEST_F(TablePageTest, IteratorSkipMarkDeletedTuples) {
+    TablePage page;
+    page.Init(1);
+
+    std::vector<RID> rids(6);
+    ASSERT_TRUE(page.InsertTuple(Tuple("T0_live"), &rids[0]));
+    ASSERT_TRUE(page.InsertTuple(Tuple("T1_delete"), &rids[1]));
+    ASSERT_TRUE(page.InsertTuple(Tuple("T2_live"), &rids[2]));
+    ASSERT_TRUE(page.InsertTuple(Tuple("T3_delete"), &rids[3]));
+    ASSERT_TRUE(page.InsertTuple(Tuple("T4_live"), &rids[4]));
+    ASSERT_TRUE(page.InsertTuple(Tuple("T5_delete"), &rids[5]));
+
+    // Mark slots 1, 3, 5 as deleted
+    EXPECT_TRUE(page.MarkDelete(rids[1]));
+    EXPECT_TRUE(page.MarkDelete(rids[3]));
+    EXPECT_TRUE(page.MarkDelete(rids[5]));
+
+    // Iterate - should only visit live slots (0, 2, 4)
+    std::vector<std::pair<uint32_t, std::string>> visited;
+    for (auto it = page.begin(); it != page.end(); ++it) {
+        visited.emplace_back(it.GetSlotNum(), std::string(it->AsStringView()));
+    }
+
+    ASSERT_EQ(visited.size(), 3);
+    EXPECT_EQ(visited[0].first, 0);
+    EXPECT_EQ(visited[0].second, "T0_live");
+
+    EXPECT_EQ(visited[1].first, 2);
+    EXPECT_EQ(visited[1].second, "T2_live");
+
+    EXPECT_EQ(visited[2].first, 4);
+    EXPECT_EQ(visited[2].second, "T4_live");
+}
+
+TEST_F(TablePageTest, IteratorSkipFirstSlotDeleted) {
+    TablePage page;
+    page.Init(1);
+
+    RID r0, r1, r2;
+    ASSERT_TRUE(page.InsertTuple(Tuple("T0_dead"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("T1_live"), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("T2_live"), &r2));
+
+    EXPECT_TRUE(page.MarkDelete(r0));
+
+    // begin() should skip slot 0 and immediately point to slot 1
+    auto it = page.begin();
+    ASSERT_NE(it, page.end());
+    EXPECT_EQ(it.GetSlotNum(), 1);
+    EXPECT_EQ(it->AsStringView(), "T1_live");
+
+    ++it;
+    ASSERT_NE(it, page.end());
+    EXPECT_EQ(it.GetSlotNum(), 2);
+    EXPECT_EQ(it->AsStringView(), "T2_live");
+
+    ++it;
+    EXPECT_EQ(it, page.end());
+}
+
+TEST_F(TablePageTest, IteratorSkipApplyDeletedAndReusedSlots) {
+    TablePage page;
+    page.Init(1);
+
+    RID r0, r1, r2;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Alpha"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Beta"), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Gamma"), &r2));
+
+    // ApplyDelete physically clears offset and size of slot 1
+    EXPECT_TRUE(page.ApplyDelete(r1));
+
+    // Iteration skips slot 1
+    std::vector<std::string> collected;
+    for (const auto &t : page) {
+        collected.emplace_back(t.AsStringView());
+    }
+    EXPECT_EQ(collected, (std::vector<std::string>{"Alpha", "Gamma"}));
+
+    // Reuse slot 1 with a new tuple
+    RID r_reuse;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Beta_Reused"), &r_reuse));
+    EXPECT_EQ(r_reuse.GetSlotNum(), 1);
+
+    // Now all 3 slots (0, 1, 2) should be visited in slot order
+    collected.clear();
+    for (const auto &t : page) {
+        collected.emplace_back(t.AsStringView());
+    }
+    EXPECT_EQ(collected, (std::vector<std::string>{"Alpha", "Beta_Reused", "Gamma"}));
+}
+
+TEST_F(TablePageTest, IteratorSkipAllDeleted) {
+    TablePage page;
+    page.Init(2);
+
+    RID r0, r1, r2;
+    ASSERT_TRUE(page.InsertTuple(Tuple("One"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Two"), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Three"), &r2));
+
+    EXPECT_TRUE(page.MarkDelete(r0));
+    EXPECT_TRUE(page.MarkDelete(r1));
+    EXPECT_TRUE(page.MarkDelete(r2));
+
+    EXPECT_EQ(page.begin(), page.end());
+    EXPECT_TRUE(page.begin().IsEnd());
+
+    int count = 0;
+    for (const auto &t : page) {
+        (void)t;
+        count++;
+    }
+    EXPECT_EQ(count, 0);
+}
+
+TEST_F(TablePageTest, IteratorRollbackDelete) {
+    TablePage page;
+    page.Init(3);
+
+    RID r0, r1;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Preserved"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Temporary"), &r1));
+
+    EXPECT_TRUE(page.MarkDelete(r1));
+
+    // Currently only r0 is visited
+    std::vector<std::string> collected;
+    for (const auto &t : page) {
+        collected.emplace_back(t.AsStringView());
+    }
+    EXPECT_EQ(collected, (std::vector<std::string>{"Preserved"}));
+
+    // Rollback delete on r1
+    EXPECT_TRUE(page.RollbackDelete(r1));
+
+    // Now both r0 and r1 are visited
+    collected.clear();
+    for (const auto &t : page) {
+        collected.emplace_back(t.AsStringView());
+    }
+    EXPECT_EQ(collected, (std::vector<std::string>{"Preserved", "Temporary"}));
+}
+
+TEST_F(TablePageTest, IteratorPostIncrement) {
+    TablePage page;
+    page.Init(1);
+
+    RID r0, r1;
+    ASSERT_TRUE(page.InsertTuple(Tuple("A"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("B"), &r1));
+
+    auto it = page.begin();
+    auto prev = it++;
+
+    EXPECT_EQ(prev.GetSlotNum(), 0);
+    EXPECT_EQ(prev->AsStringView(), "A");
+
+    EXPECT_EQ(it.GetSlotNum(), 1);
+    EXPECT_EQ(it->AsStringView(), "B");
+
+    prev = it++;
+    EXPECT_EQ(prev.GetSlotNum(), 1);
+    EXPECT_EQ(prev->AsStringView(), "B");
+
+    EXPECT_EQ(it, page.end());
+}
+
+TEST_F(TablePageTest, IteratorNextMethod) {
+    TablePage page;
+    page.Init(5);
+
+    RID r0, r1, r2, r3;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Val 0"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Val 1 (del)"), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Val 2"), &r2));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Val 3 (del)"), &r3));
+
+    page.MarkDelete(r1);
+    page.MarkDelete(r3);
+
+    auto it = page.begin();
+    Tuple tuple;
+    RID rid;
+
+    std::vector<std::pair<RID, std::string>> results;
+    while (it.Next(&tuple, &rid)) {
+        results.emplace_back(rid, std::string(tuple.AsStringView()));
+    }
+
+    ASSERT_EQ(results.size(), 2);
+    EXPECT_EQ(results[0].first, r0);
+    EXPECT_EQ(results[0].second, "Val 0");
+
+    EXPECT_EQ(results[1].first, r2);
+    EXPECT_EQ(results[1].second, "Val 2");
+
+    EXPECT_FALSE(it.Next(&tuple, &rid));
+}
+
+TEST_F(TablePageTest, IteratorStartFromSlotOrRid) {
+    TablePage page;
+    page.Init(10);
+
+    RID r0, r1, r2, r3, r4;
+    ASSERT_TRUE(page.InsertTuple(Tuple("S0"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("S1"), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("S2"), &r2));
+    ASSERT_TRUE(page.InsertTuple(Tuple("S3"), &r3));
+    ASSERT_TRUE(page.InsertTuple(Tuple("S4"), &r4));
+
+    // Start from slot 2
+    auto it_slot2 = page.Begin(2);
+    EXPECT_EQ(it_slot2.GetSlotNum(), 2);
+    EXPECT_EQ(it_slot2->AsStringView(), "S2");
+
+    // Start from RID of slot 3
+    auto it_rid3 = page.Begin(r3);
+    EXPECT_EQ(it_rid3.GetSlotNum(), 3);
+    EXPECT_EQ(it_rid3->AsStringView(), "S3");
+
+    // Start from out-of-bounds slot
+    auto it_oob = page.Begin(100);
+    EXPECT_EQ(it_oob, page.end());
+    EXPECT_TRUE(it_oob.IsEnd());
+
+    // Start from RID of different page
+    auto it_diff_page = page.Begin(RID(999, 1));
+    EXPECT_EQ(it_diff_page, page.end());
+}
+
+TEST_F(TablePageTest, IteratorWithDefragmentation) {
+    TablePage page;
+    page.Init(1);
+
+    RID r0, r1, r2, r3;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Keep 0"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(200, 'X')), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Keep 2"), &r2));
+    ASSERT_TRUE(page.InsertTuple(Tuple(std::string(300, 'Y')), &r3));
+
+    EXPECT_TRUE(page.ApplyDelete(r1));
+    EXPECT_TRUE(page.ApplyDelete(r3));
+
+    // Defragment compacts page
+    page.Defragment();
+
+    // Verify iterator visits remaining live tuples
+    std::vector<std::string> collected;
+    for (const auto &t : page) {
+        collected.emplace_back(t.AsStringView());
+    }
+    EXPECT_EQ(collected, (std::vector<std::string>{"Keep 0", "Keep 2"}));
+}
+
+TEST_F(TablePageTest, GetTupleOverloads) {
+    TablePage page;
+    page.Init(42);
+
+    RID r0, r1, r2;
+    ASSERT_TRUE(page.InsertTuple(Tuple("Tuple zero"), &r0));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Tuple one"), &r1));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Tuple two"), &r2));
+
+    EXPECT_TRUE(page.MarkDelete(r1));
+
+    // 1. GetTuple(slot_id, Tuple*)
+    Tuple t_out;
+    EXPECT_TRUE(page.GetTuple(0, &t_out));
+    EXPECT_EQ(t_out.AsStringView(), "Tuple zero");
+    EXPECT_EQ(t_out.GetRid(), r0);
+
+    EXPECT_FALSE(page.GetTuple(1, &t_out)); // Deleted
+    EXPECT_FALSE(page.GetTuple(99, &t_out)); // Out of bounds
+
+    EXPECT_TRUE(page.GetTuple(2, &t_out));
+    EXPECT_EQ(t_out.AsStringView(), "Tuple two");
+    EXPECT_EQ(t_out.GetRid(), r2);
+
+    // 2. GetTuple(slot_id) -> std::optional<Tuple>
+    auto opt0 = page.GetTuple(0);
+    ASSERT_TRUE(opt0.has_value());
+    EXPECT_EQ(opt0->AsStringView(), "Tuple zero");
+
+    auto opt1 = page.GetTuple(1);
+    EXPECT_FALSE(opt1.has_value()); // Deleted
+
+    auto opt99 = page.GetTuple(99);
+    EXPECT_FALSE(opt99.has_value()); // Out of bounds
+
+    // 3. GetTuple(rid) -> std::optional<Tuple>
+    auto opt_rid0 = page.GetTuple(r0);
+    ASSERT_TRUE(opt_rid0.has_value());
+    EXPECT_EQ(opt_rid0->AsStringView(), "Tuple zero");
+
+    auto opt_rid1 = page.GetTuple(r1);
+    EXPECT_FALSE(opt_rid1.has_value()); // Deleted
+
+    auto opt_diff_page = page.GetTuple(RID(999, 0));
+    EXPECT_FALSE(opt_diff_page.has_value()); // Wrong page
+}
+
+TEST_F(TablePageTest, IteratorStandardConceptsAndSTL) {
+    // Verify TablePageIterator satisfies std::forward_iterator concept
+    static_assert(std::forward_iterator<TablePageIterator>);
+
+    TablePage page;
+    page.Init(1);
+
+    ASSERT_TRUE(page.InsertTuple(Tuple("Apple"), nullptr));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Banana"), nullptr));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Apricot"), nullptr));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Avocado"), nullptr));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Blueberry"), nullptr));
+
+    // std::distance
+    EXPECT_EQ(std::distance(page.begin(), page.end()), 5);
+
+    // std::count_if: count strings starting with 'A'
+    auto a_count = std::count_if(page.begin(), page.end(), [](const Tuple &t) {
+        return !t.IsEmpty() && t.GetData()[0] == 'A';
+    });
+    EXPECT_EQ(a_count, 3);
+
+    // std::find_if
+    auto it_found = std::find_if(page.begin(), page.end(), [](const Tuple &t) {
+        return t.AsStringView() == "Apricot";
+    });
+    ASSERT_NE(it_found, page.end());
+    EXPECT_EQ(it_found.GetSlotNum(), 2);
+    EXPECT_EQ(it_found->AsStringView(), "Apricot");
+
+    // std::find_if not found
+    auto it_missing = std::find_if(page.begin(), page.end(), [](const Tuple &t) {
+        return t.AsStringView() == "Cherry";
+    });
+    EXPECT_EQ(it_missing, page.end());
+}
+
+TEST_F(TablePageTest, IteratorConstPageAccess) {
+    TablePage page;
+    page.Init(1);
+
+    ASSERT_TRUE(page.InsertTuple(Tuple("Const read 1"), nullptr));
+    ASSERT_TRUE(page.InsertTuple(Tuple("Const read 2"), nullptr));
+
+    const TablePage &const_page = page;
+
+    std::vector<std::string> collected;
+    for (const auto &t : const_page) {
+        collected.emplace_back(t.AsStringView());
+    }
+    EXPECT_EQ(collected, (std::vector<std::string>{"Const read 1", "Const read 2"}));
+
+    // cbegin / cend
+    EXPECT_NE(const_page.cbegin(), const_page.cend());
+    EXPECT_EQ(const_page.cbegin()->AsStringView(), "Const read 1");
+}
+
 

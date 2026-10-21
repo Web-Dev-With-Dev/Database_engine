@@ -310,25 +310,52 @@ bool TablePage::GetTuple(const RID &rid, Tuple *tuple) const {
     if (rid.GetPageId() != INVALID_PAGE_ID && rid.GetPageId() != GetTablePageId()) {
         return false;
     }
-    uint32_t slot_id = rid.GetSlotNum();
-    if (slot_id >= GetNumTuples()) {
+    return GetTuple(GetData(), GetTablePageId(), rid.GetSlotNum(), tuple);
+}
+
+bool TablePage::GetTuple(uint32_t slot_id, Tuple *tuple) const {
+    return GetTuple(GetData(), GetTablePageId(), slot_id, tuple);
+}
+
+std::optional<Tuple> TablePage::GetTuple(const RID &rid) const {
+    Tuple tuple;
+    if (GetTuple(rid, &tuple)) {
+        return tuple;
+    }
+    return std::nullopt;
+}
+
+std::optional<Tuple> TablePage::GetTuple(uint32_t slot_id) const {
+    Tuple tuple;
+    if (GetTuple(slot_id, &tuple)) {
+        return tuple;
+    }
+    return std::nullopt;
+}
+
+bool TablePage::GetTuple(const char *data, page_id_t page_id, uint32_t slot_id, Tuple *tuple) {
+    if (slot_id >= GetNumTuples(data)) {
         return false;
     }
-    if (IsTupleDeleted(slot_id)) {
+    if (IsTupleDeleted(data, slot_id)) {
         return false;
     }
 
-    uint32_t offset = GetTupleOffset(slot_id);
-    uint32_t size = GetTupleSize(slot_id);
+    uint32_t offset = GetTupleOffset(data, slot_id);
+    uint32_t size = GetTupleSize(data, slot_id);
 
     if (offset < SIZE_TABLE_PAGE_HEADER || offset + size > PAGE_SIZE) {
         return false;
     }
 
     if (tuple != nullptr) {
-        *tuple = Tuple(GetData() + offset, size, rid);
+        *tuple = Tuple(data + offset, size, RID(page_id, slot_id));
     }
     return true;
+}
+
+bool TablePage::GetTuple(const char *data, const RID &rid, Tuple *tuple) {
+    return GetTuple(data, rid.GetPageId(), rid.GetSlotNum(), tuple);
 }
 
 bool TablePage::UpdateTuple(const Tuple &new_tuple, Tuple *old_tuple, const RID &rid) {
@@ -517,3 +544,191 @@ void TablePage::Defragment(char *data) {
     }
     SetNumTuples(data, num_tuples);
 }
+
+// ==================== TablePageIterator Implementation ====================
+
+TablePageIterator::TablePageIterator(const TablePage *page, uint32_t slot_id)
+    : page_(page), slot_id_(slot_id) {
+    if (page_ != nullptr) {
+        if (slot_id_ < page_->GetNumTuples()) {
+            AdvanceToNextLiveSlot();
+        } else {
+            slot_id_ = page_->GetNumTuples();
+            current_tuple_ = Tuple{};
+        }
+    } else {
+        slot_id_ = 0;
+        current_tuple_ = Tuple{};
+    }
+}
+
+TablePageIterator::TablePageIterator(const TablePage *page, const RID &rid)
+    : TablePageIterator(
+          page,
+          (rid.GetPageId() == INVALID_PAGE_ID || (page != nullptr && rid.GetPageId() == page->GetTablePageId()))
+              ? rid.GetSlotNum()
+              : (page != nullptr ? page->GetNumTuples() : 0)) {}
+
+void TablePageIterator::AdvanceToNextLiveSlot() {
+    if (page_ == nullptr) {
+        slot_id_ = 0;
+        current_tuple_ = Tuple{};
+        return;
+    }
+
+    uint32_t num_tuples = page_->GetNumTuples();
+    while (slot_id_ < num_tuples) {
+        if (!page_->IsTupleDeleted(slot_id_) && page_->GetTupleSize(slot_id_) > 0) {
+            RID rid(page_->GetTablePageId(), slot_id_);
+            Tuple tuple;
+            if (page_->GetTuple(rid, &tuple)) {
+                current_tuple_ = std::move(tuple);
+                return;
+            }
+        }
+        ++slot_id_;
+    }
+
+    // Reached end of page
+    slot_id_ = num_tuples;
+    current_tuple_ = Tuple{};
+}
+
+TablePageIterator &TablePageIterator::operator++() {
+    if (!IsEnd()) {
+        ++slot_id_;
+        AdvanceToNextLiveSlot();
+    }
+    return *this;
+}
+
+TablePageIterator TablePageIterator::operator++(int) {
+    TablePageIterator temp = *this;
+    ++(*this);
+    return temp;
+}
+
+bool TablePageIterator::operator==(const TablePageIterator &other) const {
+    if (page_ == nullptr && other.page_ == nullptr) {
+        return true;
+    }
+    if (page_ != other.page_) {
+        if (page_ == nullptr && other.IsEnd()) {
+            return true;
+        }
+        if (other.page_ == nullptr && IsEnd()) {
+            return true;
+        }
+        return false;
+    }
+    if (IsEnd() && other.IsEnd()) {
+        return true;
+    }
+    return slot_id_ == other.slot_id_;
+}
+
+bool TablePageIterator::GetTuple(Tuple *tuple) const {
+    if (IsEnd()) {
+        return false;
+    }
+    if (tuple != nullptr) {
+        *tuple = current_tuple_;
+    }
+    return true;
+}
+
+RID TablePageIterator::GetRid() const {
+    if (IsEnd() || page_ == nullptr) {
+        return RID{};
+    }
+    return RID(page_->GetTablePageId(), slot_id_);
+}
+
+page_id_t TablePageIterator::GetPageId() const {
+    return page_ != nullptr ? page_->GetTablePageId() : INVALID_PAGE_ID;
+}
+
+bool TablePageIterator::IsEnd() const {
+    return page_ == nullptr || slot_id_ >= page_->GetNumTuples();
+}
+
+bool TablePageIterator::Next(Tuple *tuple, RID *rid) {
+    if (IsEnd()) {
+        return false;
+    }
+    if (tuple != nullptr) {
+        *tuple = current_tuple_;
+    }
+    if (rid != nullptr) {
+        *rid = GetRid();
+    }
+    operator++();
+    return true;
+}
+
+void TablePageIterator::Refresh() {
+    if (!IsEnd() && page_ != nullptr) {
+        RID rid(page_->GetTablePageId(), slot_id_);
+        Tuple tuple;
+        if (page_->GetTuple(rid, &tuple)) {
+            current_tuple_ = std::move(tuple);
+        } else {
+            AdvanceToNextLiveSlot();
+        }
+    }
+}
+
+// ==================== TablePage Iterator Methods ====================
+
+TablePage::Iterator TablePage::begin() {
+    return Iterator(this, 0);
+}
+
+TablePage::Iterator TablePage::end() {
+    return Iterator(this, GetNumTuples());
+}
+
+TablePage::Iterator TablePage::begin() const {
+    return Iterator(this, 0);
+}
+
+TablePage::Iterator TablePage::end() const {
+    return Iterator(this, GetNumTuples());
+}
+
+TablePage::Iterator TablePage::cbegin() const {
+    return begin();
+}
+
+TablePage::Iterator TablePage::cend() const {
+    return end();
+}
+
+TablePage::Iterator TablePage::Begin() {
+    return begin();
+}
+
+TablePage::Iterator TablePage::End() {
+    return end();
+}
+
+TablePage::Iterator TablePage::Begin() const {
+    return begin();
+}
+
+TablePage::Iterator TablePage::End() const {
+    return end();
+}
+
+TablePage::Iterator TablePage::Begin(uint32_t start_slot) const {
+    return Iterator(this, start_slot);
+}
+
+TablePage::Iterator TablePage::Begin(const RID &start_rid) const {
+    return Iterator(this, start_rid);
+}
+
+TablePage::Iterator TablePage::GetIterator() const {
+    return begin();
+}
+
