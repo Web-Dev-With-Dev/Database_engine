@@ -28,7 +28,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libgtest-dev ${{ matrix.c_compiler }} ${{ matrix.cpp_compiler }}
+          sudo apt-get install -y ninja-build libgtest-dev libgmock-dev ${{ matrix.c_compiler }} ${{ matrix.cpp_compiler }}
 
       - name: Configure CMake
         run: |
